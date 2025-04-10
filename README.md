@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-一个用于 [AstrBot](https://github.com/your-astrbot-repo) 的插件，允许用户通过聊天命令与 [Alist](https://alist.nn.ci/) 服务进行交互，实现文件浏览、搜索和存储管理等功能。
+一个用于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的插件，允许用户通过聊天命令与 [Alist](https://alist.nn.ci/) 服务进行交互，实现文件浏览、搜索和存储管理等功能。
 
 ## ✨ 功能特性
 
