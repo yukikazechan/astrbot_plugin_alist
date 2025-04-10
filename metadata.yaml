@@ -2,4 +2,4 @@ name: astrbot_plugin_alist
 author: arikacips
 version: 0.0.114514
 description: 一个用于与 Alist 交互的 AstrBot 插件，提供文件搜索、存储管理等功能。
-repo: "https://github.com/yukikazechan/astrbot_plugin_alist" 
+repo: https://github.com/yukikazechan/astrbot_plugin_alist
