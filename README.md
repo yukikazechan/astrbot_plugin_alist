@@ -50,7 +50,3 @@
     `/al enable 5`
 *   **获取帮助:**
     `/al help`
-
-## 📄 许可证
-
-[MIT](https://opensource.org/licenses/MIT)
