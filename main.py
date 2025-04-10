@@ -203,21 +203,22 @@ class AlistClient:
             return False, f"解析响应失败: {response.text}"
 
     async def storage_delete(self, storage_id: int) -> bool:
-        payload = [storage_id]
-        response = await self._simple_request("POST", "/admin/storage/delete", json=payload)
+    # 使用查询参数发送 ID，而不是 JSON 数组
+        response = await self._simple_request("POST", f"/admin/storage/delete?id={storage_id}")
         if response is None:
-             logger.error("storage_delete failed: No response from API.")
-             return False
+            logger.error("storage_delete failed: No response from API.")
+            return False
         try:
             data = response.json()
+            logger.debug(f"storage_delete response: Status {response.status_code}, Body {data}")
             if response.status_code == 200 and data.get("code") == 200:
                 logger.info(f"Successfully deleted storage ID: {storage_id}")
                 return True
             else:
-                logger.error(f"storage_delete failed: Status {response.status_code}, Body {data}")
+                logger.error(f"storage_delete failed: Status {response.status_code}, Code {data.get('code', 'N/A')}, Message {data.get('message', 'No message')}")
                 return False
         except Exception as e:
-            logger.error(f"Error parsing storage_delete response: {e}", exc_info=True)
+            logger.error(f"Error parsing storage_delete response: {e}, Response text: {response.text}", exc_info=True)
             return False
 
 # --- AstrBot Plugin ---
