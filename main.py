@@ -85,11 +85,10 @@ class AlistClient:
             logger.debug(f"Alist API Response Data (type: {type(data)}): {data}")
             if isinstance(data, dict) and "code" in data:
                 if data.get("code") == 200:
-                    # For /fs/list, the actual content is directly in 'data', not 'data.data'
                     if path == "/fs/list":
-                        return data.get("data") # Return the inner data dict which contains 'content'
+                        return data.get("data")
                     else:
-                         return data.get("data") if "data" in data else data # Original logic for other endpoints
+                         return data.get("data") if "data" in data else data
                 else:
                     logger.error(f"Alist API error ({path}): Code {data.get('code')} - {data.get('message', 'Unknown error')}. Response: {data}")
                     return None
@@ -119,7 +118,6 @@ class AlistClient:
             logger.error(f"Alist API unexpected error ({path}): {e}", exc_info=True)
             return None
 
-
     async def _simple_request(self, method: str, path: str, **kwargs) -> Optional[httpx.Response]:
          client = await self.get_client()
          url = f"/api{path}"
@@ -136,12 +134,12 @@ class AlistClient:
              return None
 
     async def search(self, keywords: str, page: int = 1, per_page: int = 100, parent: str = "/") -> Optional[Dict[str, Any]]:
-        """Search for files using /api/fs/search."""
+        """Search for files using /api/fs/search with pagination."""
         payload = {
             "parent": parent,
             "keywords": keywords,
             "page": page,
-            "per_page": per_page
+            "per_page": max(1, per_page)  # Ensure per_page is at least 1
         }
         logger.debug(f"Calling /api/fs/search with payload: {payload}")
         result = await self._request("POST", "/fs/search", json=payload)
@@ -149,20 +147,16 @@ class AlistClient:
 
     async def list_directory(self, path: str) -> Optional[Dict[str, Any]]:
         """List contents of a directory using /api/fs/list with per_page=0."""
-        # Use raw path in payload. Use per_page: 0 based on successful external API call.
         payload = {
             "path": path,
-            "password": "", # Include empty password
-            "page": 1,      # Always request page 1 when getting all items
-            "per_page": 0,  # Request all items
+            "password": "",
+            "page": 1,
+            "per_page": 0,
             "refresh": False
         }
         logger.debug(f"Calling /api/fs/list with per_page=0 and raw path: {path}")
-        # Note: _request handles extracting the 'data' part from the response envelope
         result = await self._request("POST", "/fs/list", json=payload)
-        # The result from _request should now be the inner data dict containing 'content' and 'total'
         return result if isinstance(result, dict) else None
-
 
     async def storage_list(self) -> Optional[List[Dict[str, Any]]]:
         result_data = await self._request("GET", "/admin/storage/list")
@@ -226,13 +220,12 @@ class AlistClient:
             logger.error(f"Error parsing storage_delete response: {e}", exc_info=True)
             return False
 
-
 # --- AstrBot Plugin ---
 @register(
     "astrbot_plugin_alist",
     "Cline (Generated)",
     "通过机器人查看alist，支持管理存储和搜索文件",
-    "0.1.14514", # Incremented version
+    "1.1.4514",  # Incremented version
     ""
 )
 class AlistPlugin(Star):
@@ -242,9 +235,8 @@ class AlistPlugin(Star):
         self.config = config
         self.alist_client: Optional[AlistClient] = None
         self.lock = asyncio.Lock()
-        # Stores {user_id: {"keywords": Optional[str], "results": [...], "parent": "...", "timestamp": ..., "current_page": ..., "total_pages": ..., "full_content": [...]}}
         self.last_search_state: Dict[str, Any] = {}
-        self.search_state_timeout: int = 180 # Increased timeout to 3 minutes
+        self.search_state_timeout: int = 180
 
         logger.debug("Creating task for _initialize_client")
         task_creator = getattr(context, 'create_task', asyncio.create_task)
@@ -252,7 +244,6 @@ class AlistPlugin(Star):
         logger.info("Alist Plugin loaded (init called).")
 
     async def _initialize_client(self):
-        """Initialize the Alist client asynchronously."""
         logger.debug("Attempting to initialize Alist client asynchronously...")
         async with self.lock:
             if self.alist_client:
@@ -285,7 +276,6 @@ class AlistPlugin(Star):
         logger.debug(f"Async initialization finished. Client is {'set' if self.alist_client else 'None'}.")
 
     async def _get_client(self) -> Optional[AlistClient]:
-        """Get the Alist client, waiting for initialization if necessary."""
         logger.debug(f"Entering _get_client. Current client state: {'Initialized' if self.alist_client else 'None'}")
         if self.alist_client is None:
              logger.debug("Client is None in _get_client, waiting on lock for potential initialization.")
@@ -302,7 +292,6 @@ class AlistPlugin(Star):
         return self.alist_client
 
     def _format_size(self, size_bytes: int) -> str:
-        """Format bytes into a human-readable string."""
         if size_bytes < 0: return "未知大小"
         if size_bytes < 1024:
             return f"{size_bytes} B"
@@ -316,7 +305,6 @@ class AlistPlugin(Star):
             return f"{size_bytes/1024**4:.1f} TB"
 
     async def terminate(self):
-        """Clean up resources when the plugin is terminated."""
         logger.info("Alist Plugin terminating...")
         if self.alist_client:
             logger.debug("Closing Alist client during terminate.")
@@ -327,73 +315,67 @@ class AlistPlugin(Star):
         logger.info("Alist Plugin terminated.")
 
     async def _execute_api_call_and_format(self, event: AstrMessageEvent, client: AlistClient, page: int, per_page: int, parent: str = "/", keywords: Optional[str] = None) -> Optional[str]:
-        """Helper function to execute API call (search or list), format results, and store state."""
         is_search = keywords is not None
         api_call_type = "search" if is_search else "list"
         api_keywords = keywords if is_search else ""
 
         logger.debug(f"Executing API helper - Type: {api_call_type}, API Keywords: '{api_keywords}', Page: {page}, PerPage: {per_page}, Parent: {parent}")
 
-        full_content = [] # Store the full list for client-side pagination if needed
+        full_content = []
         total = 0
         api_data = None
 
         try:
             if is_search:
-                # Use search API with pagination parameters from caller
+                # For search, fetch the specific page from the API
                 api_data = await client.search(keywords=api_keywords, page=page, per_page=per_page, parent=parent)
                 if api_data:
                     full_content = api_data.get("content", [])
                     total = api_data.get("total", 0)
             else:
-                # Use list API with per_page=0
-                api_data = await client.list_directory(path=parent) # list_directory now handles per_page=0
+                # For directory listing, fetch all results and paginate client-side
+                api_data = await client.list_directory(path=parent)
                 if api_data:
                     full_content = api_data.get("content", [])
-                    # Use length of full_content as total when listing directory
                     total = len(full_content)
                     logger.debug(f"List directory successful. Total items fetched: {total}")
-
 
             if api_data is None:
                 action_desc = f"搜索 '{api_keywords}'" if is_search else "列出目录"
                 return f"❌ 在路径 '{parent}' 中{action_desc}时出错或未找到结果。"
 
-            # Calculate total_pages based on the *original* per_page requested by the command
             total_pages = math.ceil(total / per_page) if per_page > 0 else 1
 
-            # Perform client-side pagination on the full_content
-            start_index = (page - 1) * per_page
-            end_index = start_index + per_page
-            display_content = full_content[start_index:end_index] if per_page > 0 else full_content
+            if is_search:
+                # For search, use the API-provided content directly (already paginated)
+                display_content = full_content
+            else:
+                # For listing, paginate client-side
+                start_index = (page - 1) * per_page
+                end_index = start_index + per_page
+                display_content = full_content[start_index:end_index] if per_page > 0 else full_content
 
             if not display_content:
                  action_desc = f"与 '{api_keywords}' 相关的文件" if is_search else "任何文件或文件夹"
                  if page == 1:
-                     # If total is also 0, then the folder/search is truly empty
                      if total == 0:
                          return f"❎ 在路径 '{parent}' 中未能找到{action_desc}。"
                      else:
-                         # This case shouldn't happen with correct logic, but handle defensively
                          return f"❎ 在路径 '{parent}' 中找到 {total} 个结果，但无法显示第 1 页。"
                  else:
-                     # Requested page is out of bounds
                      return f"❎ 在路径 '{parent}' 的第 {page} 页没有找到{action_desc} (共 {total_pages} 页)。"
-
 
             reply_text = f"✅ 在 '{parent}' 中找到 {total} 个结果 (第 {page}/{total_pages} 页):\n"
 
-            # Display only the content for the current page
+            # Calculate overall index for display
+            start_index = (page - 1) * per_page if is_search else (page - 1) * per_page
             for i, item in enumerate(display_content):
-                # Calculate the overall index based on the page and per_page
                 overall_index = start_index + i + 1
                 is_dir = item.get("is_dir", False)
                 item_type = "📁" if is_dir else "📄"
                 size_str = self._format_size(item.get("size", 0)) if not is_dir else ""
                 name = item.get('name', '未知名称')
-                # Use overall_index for display number
                 reply_text += f"\n{overall_index}. {item_type} {name} {'('+size_str+')' if size_str else ''}"
-                # Add download link for files
                 if not is_dir and client.host:
                     try:
                         item_parent_path = item.get("parent", "/")
@@ -401,32 +383,28 @@ class AlistPlugin(Star):
                         if not full_path.startswith("/"):
                             full_path = "/" + full_path
                         encoded_path = quote(full_path)
-                        link = f"{client.host}/d{encoded_path}" # Construct download link
+                        link = f"{client.host}/d{encoded_path}"
                         reply_text += f"\n  Link: {link}"
                     except Exception as link_e:
                         logger.error(f"Error generating link for {name}: {link_e}")
 
-
-            # Add pagination info if needed
             if total_pages > 1:
                 reply_text += f"\n\n📄 使用 /al np 翻页 (下一页), /al lp 翻页 (上一页)。 (共 {total_pages} 页)"
-            # Add folder navigation info if needed
-            if any(item.get("is_dir") for item in display_content): # Check display_content
+            if any(item.get("is_dir") for item in display_content):
                 reply_text += "\n\n➡️ 使用 /al fl <序号> 进入文件夹。"
 
-            # Store state
             sender_id = event.get_sender_id()
             if sender_id:
-                 # Store the full content, not just the displayed content
                  self.last_search_state[sender_id] = {
-                     "keywords": keywords, # Store original keywords (None for list)
-                     "results": full_content, # Store the full content for correct folder indexing
+                     "keywords": keywords,
+                     "results": full_content,  # Store current page for search, full content for list
                      "parent": parent,
                      "current_page": page,
                      "total_pages": total_pages,
-                     "timestamp": time.time()
+                     "timestamp": time.time(),
+                     "total": total  # Store total for pagination calculations
                  }
-                 logger.debug(f"Stored state for user {sender_id}: page {page}/{total_pages}, keywords '{keywords}', parent '{parent}', total {len(full_content)} items")
+                 logger.debug(f"Stored state for user {sender_id}: page {page}/{total_pages}, keywords '{keywords}', parent '{parent}', total {total} items")
             else:
                  logger.warning("Could not get sender ID from event, state not stored.")
 
@@ -451,12 +429,12 @@ class AlistPlugin(Star):
         per_page = self.config.get("search_result_limit", 10)
         yield event.plain_result(f"⏳ 正在根目录 '/' 搜索 '{keywords}'...")
 
-        result_message = await self._execute_api_call_and_format(event, client, page, per_page, parent, keywords=keywords) # Pass keywords
+        result_message = await self._execute_api_call_and_format(event, client, page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
     @filter.command("al fl", alias={'alist fl', 'al folder', 'alist folder', 'al 进入', 'alist 进入', 'fl', 'folder', '进入'})
     async def folder_command(self, event: AstrMessageEvent, index_str: str):
-        """进入指定序号的文件夹。用法: /al fl <序号> (或 /al folder <序号>)"""
+        """进入指定序号的文件夹。用法: /al fl <序号>"""
         logger.debug(f"folder_command (now /al fl) called with index string: {index_str}")
 
         sender_id = event.get_sender_id()
@@ -465,63 +443,53 @@ class AlistPlugin(Star):
             return
 
         state = self.last_search_state.get(sender_id)
-        current_time = time.time()
-
         if not state or (time.time() - state["timestamp"]) > self.search_state_timeout:
             yield event.plain_result("❌ 没有找到最近的搜索记录或已超时 (3分钟)。请重新使用 /al s 搜索。")
             return
 
         try:
             index = int(index_str)
-
-            if not (0 < index <= len(state["results"])):
-                 # Use state["total_pages"] * per_page or similar if total count isn't directly available?
-                 # No, state["results"] now holds the full list, so len() is correct.
-                 yield event.plain_result(f"❌ 无效的序号 '{index}'。请从 1 到 {len(state['results'])} 中选择。")
+            if not (0 < index <= state.get("total", len(state["results"]))):
+                 yield event.plain_result(f"❌ 无效的序号 '{index}'。请从 1 到 {state.get('total', len(state['results']))} 中选择。")
                  return
 
-            # Get the selected item directly from the full results list using the overall index
-            # The user provides the overall index (e.g., 15), which corresponds to index-1 in the full list.
-            selected_item = state["results"][index - 1]
+            # Adjust index for the current page's results
+            page_start_index = (state["current_page"] - 1) * self.config.get("search_result_limit", 10) + 1
+            relative_index = index - page_start_index
+            if not (0 <= relative_index < len(state["results"])):
+                yield event.plain_result(f"❌ 序号 {index} 不在当前页 (第 {state['current_page']} 页) 的范围内。")
+                return
 
+            selected_item = state["results"][relative_index]
             if not selected_item.get("is_dir"):
                  yield event.plain_result(f"❌ 无法进入，序号 {index} ('{selected_item.get('name')}') 不是文件夹。")
                  return
 
             folder_name = selected_item.get("name")
-
-            # Determine the correct parent path. If the selected item has a 'parent' field, use it.
-            # Otherwise, use the current state's parent (which is where we're listing from).
             if "parent" in selected_item and selected_item["parent"]:
                 parent_path = selected_item["parent"]
             else:
                 parent_path = state.get("parent", "/")
 
-            # Construct the full path manually for URL consistency
             if parent_path == "/":
                 new_parent = f"/{folder_name}"
             else:
                 new_parent = f"{parent_path.rstrip('/')}/{folder_name}"
 
-            # Ensure the path starts with a single slash if it's not just "/"
             if not new_parent.startswith("/") and new_parent != "/":
                 new_parent = "/" + new_parent
-            # Remove any potential double slashes resulting from joining
             new_parent = new_parent.replace("//", "/")
 
             logger.debug(f"Entering folder: {new_parent}")
 
-            # Now, list the contents of the new parent directory
             client = await self._get_client()
             if not client:
                 yield event.plain_result("❌ 错误：Alist 客户端未配置或初始化失败。")
                 return
 
-            per_page = self.config.get("search_result_limit", 10) # Use same limit for consistency
+            per_page = self.config.get("search_result_limit", 10)
             yield event.plain_result(f"⏳ 正在进入并列出 '{new_parent}'...")
 
-            # Call the helper function to list the new directory
-            # Reset keywords to None as we are listing, not searching
             result_message = await self._execute_api_call_and_format(
                 event, client, page=1, per_page=per_page, parent=new_parent, keywords=None
             )
@@ -530,14 +498,13 @@ class AlistPlugin(Star):
         except ValueError:
             yield event.plain_result(f"❌ 无效的序号 '{index_str}'。请输入一个数字。")
         except IndexError:
-             # This might happen if state["results"] is unexpectedly empty or index is wrong
              logger.error(f"IndexError accessing state['results'] with index {index-1}. State: {state}")
              yield event.plain_result(f"❌ 内部错误：无法在缓存的结果中找到序号 {index}。请重试。")
         except Exception as e:
             logger.error(f"Error during folder navigation: {e}", exc_info=True)
-            yield event.plain_result(f"进入文件夹时发生内部错误，请查看日志。") # Corrected indentation
+            yield event.plain_result(f"进入文件夹时发生内部错误，请查看日志。")
 
-    @filter.command("al home", alias={'alist home'}) # Removed ambiguous '/alist' alias
+    @filter.command("al home", alias={'alist home'})
     async def list_home_command(self, event: AstrMessageEvent):
         """列出 Alist 根目录的内容。用法: /al home"""
         logger.debug("list_home_command called.")
@@ -549,13 +516,11 @@ class AlistPlugin(Star):
             yield event.plain_result("错误：Alist 客户端未配置或初始化失败。")
             return
 
-        per_page = self.config.get("search_result_limit", 10) # Use same limit for consistency
+        per_page = self.config.get("search_result_limit", 10)
         yield event.plain_result(f"⏳ 正在列出根目录 '/' 的内容...")
 
-        # Call helper with keywords=None to list directory contents
         result_message = await self._execute_api_call_and_format(event, client, page, per_page, parent, keywords=None)
         yield event.plain_result(result_message)
-
 
     @filter.command("al np", alias={'alist np', 'al 下一页', 'alist 下一页', 'np', '下一页'})
     async def next_page_command(self, event: AstrMessageEvent):
@@ -567,9 +532,7 @@ class AlistPlugin(Star):
 
         logger.debug(f"next_page_command (now /al np) called by user {sender_id}")
         state = self.last_search_state.get(sender_id)
-        current_time = time.time()
-
-        if not state or (current_time - state["timestamp"]) > self.search_state_timeout:
+        if not state or (time.time() - state["timestamp"]) > self.search_state_timeout:
             yield event.plain_result("❌ 没有找到最近的记录或已超时 (3分钟)。请重新使用 /al s 或 /al fl。")
             return
 
@@ -578,7 +541,7 @@ class AlistPlugin(Star):
             return
 
         next_page = state["current_page"] + 1
-        keywords = state["keywords"] # Will be None if listing folder
+        keywords = state["keywords"]
         parent = state["parent"]
         logger.debug(f"Fetching next page ({next_page}) for parent '{parent}' for user {sender_id}")
 
@@ -590,7 +553,6 @@ class AlistPlugin(Star):
         per_page = self.config.get("search_result_limit", 10)
         yield event.plain_result(f"⏳ 正在获取下一页 (第 {next_page} 页)...")
 
-        # Re-execute the call, _execute_api_call_and_format handles client-side pagination now
         result_message = await self._execute_api_call_and_format(event, client, next_page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
@@ -604,9 +566,7 @@ class AlistPlugin(Star):
 
         logger.debug(f"last_page_command (now /al lp) called by user {sender_id}")
         state = self.last_search_state.get(sender_id)
-        current_time = time.time()
-
-        if not state or (current_time - state["timestamp"]) > self.search_state_timeout:
+        if not state or (time.time() - state["timestamp"]) > self.search_state_timeout:
             yield event.plain_result("❌ 没有找到最近的记录或已超时 (3分钟)。请重新使用 /al s 或 /al fl。")
             return
 
@@ -615,7 +575,7 @@ class AlistPlugin(Star):
             return
 
         prev_page = state["current_page"] - 1
-        keywords = state["keywords"] # Will be None if listing folder
+        keywords = state["keywords"]
         parent = state["parent"]
         logger.debug(f"Fetching previous page ({prev_page}) for parent '{parent}' for user {sender_id}")
 
@@ -627,7 +587,6 @@ class AlistPlugin(Star):
         per_page = self.config.get("search_result_limit", 10)
         yield event.plain_result(f"⏳ 正在获取上一页 (第 {prev_page} 页)...")
 
-        # Re-execute the call, _execute_api_call_and_format handles client-side pagination now
         result_message = await self._execute_api_call_and_format(event, client, prev_page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
@@ -740,12 +699,11 @@ class AlistPlugin(Star):
     @filter.command("al help", alias={'alist help', 'al 帮助', 'alist 帮助', 'help', '帮助'})
     async def help_command(self, event: AstrMessageEvent):
         """显示 Alist 插件的所有命令及其用法。"""
-        logger.critical("TESTING LOG OUTPUT") # Added test log line
         reply_text = "首次使用记得填写alist的地址和token\n"
-        reply_text = "Alist 插件命令 (前缀 /al 或 /alist):\n"
+        reply_text += "Alist 插件命令 (前缀 /al 或 /alist):\n"
         reply_text += "/al s <关键词> - 在 Alist 中搜索文件。\n"
         reply_text += "/al fl <序号> - 进入指定序号的文件夹。\n"
-        reply_text += "/al home - 列出根目录内容。\n" # Removed '/alist' alias from help text
+        reply_text += "/al home - 列出根目录内容。\n"
         reply_text += "/al np - 跳转到列表结果的下一页。\n"
         reply_text += "/al lp - 跳转到列表结果的上一页。\n"
         reply_text += "/al list - 列出所有 Alist 存储。\n"
