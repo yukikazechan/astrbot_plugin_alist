@@ -1,0 +1,26 @@
+{
+    "alist_host": {
+        "description": "Alist API 地址",
+        "type": "string",
+        "hint": "例如：http://127.0.0.1:5244 或 https://your.alist.domain 如果你的AstrBot部署在docker环境下则填入宿主机的ip 例如 http://172.17.0.1:5244",
+        "default": "http://127.0.0.1:5244"
+    },
+    "alist_token": {
+        "description": "Alist API Token",
+        "type": "string",
+        "hint": "在 Alist 后台管理 -> 设置 -> 其他 中查看或生成",
+        "default": ""
+    },
+    "search_result_limit": {
+        "description": "文件列表单页数量",
+        "type": "int",
+        "hint": "文件列表默认返回的单页的数量",
+        "default": 10
+    },
+    "timeout": {
+        "description": "API 请求超时时间 (秒)",
+        "type": "int",
+        "hint": "连接 Alist API 的超时时间",
+        "default": 10
+    }
+}
