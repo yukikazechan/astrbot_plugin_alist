@@ -415,7 +415,7 @@ class AlistPlugin(Star):
             logger.error(f"Error during API call execution/formatting: {e}", exc_info=True)
             return f"处理请求时发生内部错误，请查看日志。"
 
-    @filter.command("al s", alias={'alist s', 'al 搜索', 'alist 搜索', 's', '搜索'})
+    @filter.command("al s", alias={'alist s', 'al 搜索', 'alist 搜索', 'alist search', 'al search'})
     async def search_command(self, event: AstrMessageEvent, keywords: str):
         """使用 /al s 命令在 Alist 中搜索文件。用法: /al s <关键词>"""
         logger.debug(f"search_command (now /al s) called with keywords: '{keywords}'")
@@ -433,7 +433,7 @@ class AlistPlugin(Star):
         result_message = await self._execute_api_call_and_format(event, client, page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
-    @filter.command("al fl", alias={'alist fl', 'al folder', 'alist folder', 'al 进入', 'alist 进入', 'fl', 'folder', '进入'})
+    @filter.command("al fl", alias={'alist fl', 'al folder', 'alist folder', 'al 文件夹', 'alist 文件夹'})
     async def folder_command(self, event: AstrMessageEvent, index_str: str):
         """进入指定序号的文件夹。用法: /al fl <序号>"""
         logger.debug(f"folder_command (now /al fl) called with index string: {index_str}")
@@ -523,7 +523,7 @@ class AlistPlugin(Star):
         result_message = await self._execute_api_call_and_format(event, client, page, per_page, parent, keywords=None)
         yield event.plain_result(result_message)
 
-    @filter.command("al np", alias={'alist np', 'al 下一页', 'alist 下一页', 'np', '下一页'})
+    @filter.command("al np", alias={'alist np', 'al 下一页', 'alist 下一页'})
     async def next_page_command(self, event: AstrMessageEvent):
         """跳转到搜索列表结果的下一页。"""
         sender_id = event.get_sender_id()
@@ -557,7 +557,7 @@ class AlistPlugin(Star):
         result_message = await self._execute_api_call_and_format(event, client, next_page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
-    @filter.command("al lp", alias={'alist lp', 'al 上一页', 'alist 上一页', 'lp', '上一页'})
+    @filter.command("al lp", alias={'alist lp', 'al 上一页', 'alist 上一页'})
     async def last_page_command(self, event: AstrMessageEvent):
         """跳转到搜索列表结果的上一页。"""
         sender_id = event.get_sender_id()
@@ -591,7 +591,7 @@ class AlistPlugin(Star):
         result_message = await self._execute_api_call_and_format(event, client, prev_page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
-    @filter.command("al list", alias={'alist list', 'al 列表', 'alist 列表', 'list', '列表'})
+    @filter.command("al list", alias={'alist list', 'al 列表', 'alist 列表'})
     async def list_storages(self, event: AstrMessageEvent):
         """列出所有 Alist 存储。用法: /al list"""
         logger.debug("list_storages (now /al list) command called.")
@@ -634,7 +634,7 @@ class AlistPlugin(Star):
             logger.error(f"Error listing storages: {e}", exc_info=True)
             yield event.plain_result(f"获取存储列表时发生内部错误，请查看日志。")
 
-    @filter.command("al enable", alias={'alist enable', 'al 启用', 'alist 启用', 'enable', '启用'})
+    @filter.command("al enable", alias={'alist enable', 'al 启用', 'alist 启用'})
     async def enable_storage(self, event: AstrMessageEvent, storage_id: int):
         """启用指定的 Alist 存储。用法: /al enable <存储ID>"""
         logger.debug(f"enable_storage (now /al enable) command called for ID: {storage_id}")
@@ -655,7 +655,7 @@ class AlistPlugin(Star):
             logger.error(f"Error enabling storage {storage_id}: {e}", exc_info=True)
             yield event.plain_result(f"启用存储时发生内部错误，请查看日志。")
 
-    @filter.command("al disable", alias={'alist disable', 'al 禁用', 'alist 禁用', 'disable', '禁用'})
+    @filter.command("al disable", alias={'alist disable', 'al 禁用', 'alist 禁用'})
     async def disable_storage(self, event: AstrMessageEvent, storage_id: int):
         """禁用指定的 Alist 存储。用法: /al disable <存储ID>"""
         logger.debug(f"disable_storage (now /al disable) command called for ID: {storage_id}")
@@ -676,7 +676,7 @@ class AlistPlugin(Star):
             logger.error(f"Error disabling storage {storage_id}: {e}", exc_info=True)
             yield event.plain_result(f"禁用存储时发生内部错误，请查看日志。")
 
-    @filter.command("al delete", alias={'alist delete', 'al 删除', 'alist 删除', 'delete', '删除'})
+    @filter.command("al delete", alias={'alist delete', 'al 删除', 'alist 删除'})
     async def delete_storage(self, event: AstrMessageEvent, storage_id: int):
         """删除指定的 Alist 存储。用法: /al delete <存储ID>"""
         logger.debug(f"delete_storage (now /al delete) command called for ID: {storage_id}")
@@ -697,7 +697,7 @@ class AlistPlugin(Star):
             logger.error(f"Error deleting storage {storage_id}: {e}", exc_info=True)
             yield event.plain_result(f"删除存储时发生内部错误，请查看日志。")
 
-    @filter.command("al help", alias={'alist help', 'al 帮助', 'alist 帮助', 'help', '帮助'})
+    @filter.command("al help", alias={'alist help', 'al 帮助', 'alist 帮助'})
     async def help_command(self, event: AstrMessageEvent):
         """显示 Alist 插件的所有命令及其用法。"""
         reply_text = "首次使用记得填写alist的地址和token\n"
