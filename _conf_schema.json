@@ -2,7 +2,7 @@
     "alist_host": {
         "description": "Alist API 地址",
         "type": "string",
-        "hint": "例如：http://127.0.0.1:5244 或 https://your.alist.domain 如果你的AstrBot部署在docker环境下则填入宿主机的ip 例如 http://172.17.0.1:5244",
+        "hint": "例如：http://127.0.0.1:5244 或 https://your.alist.domain",
         "default": "http://127.0.0.1:5244"
     },
     "alist_token": {
@@ -22,7 +22,7 @@
         "type": "int",
         "hint": "连接 Alist API 的超时时间",
         "default": 10
-    }，
+    },
     "admin_users": {
         "description": "管理员用户 ID 列表",
         "type": "list",
