@@ -22,5 +22,11 @@
         "type": "int",
         "hint": "连接 Alist API 的超时时间",
         "default": 10
+    }，
+    "admin_users": {
+        "description": "管理员用户 ID 列表",
+        "type": "list",
+        "hint": "允许使用此插件所有命令的用户 ID 列表",
+        "default": []
     }
 }
