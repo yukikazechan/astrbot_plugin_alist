@@ -25,7 +25,7 @@
     }，
     "admin_users": {
         "description": "管理员用户 ID 列表",
-        "type": "string",
+        "type": "list",
         "hint": "允许使用此插件所有命令的用户 ID 列表",
         "default": []
     }
