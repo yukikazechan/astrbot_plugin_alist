@@ -45,20 +45,52 @@ except ImportError:
 
 # --- Alist API Client ---
 class AlistClient:
-    def __init__(self, host: str, token: str, timeout: int = 10):
+    def __init__(self, host: str, username: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None, timeout: int = 10):
         self.host = host.rstrip('/')
+        self.username = username
+        self.password = password
         self.token = token
         self.timeout = timeout
         self.headers = {
-            "Authorization": self.token,
             "Content-Type": "application/json",
             "User-Agent": "AstrBot/AlistPlugin"
         }
         self._client: Optional[httpx.AsyncClient] = None
 
+    async def authenticate(self):
+        if not self.username or not self.password:
+            logger.error("用户名或密码未配置，无法进行身份验证。")
+            return
+
+        login_url = f"{self.host}/api/auth/login"
+        credentials = {"username": self.username, "password": self.password}
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(login_url, json=credentials)
+                response.raise_for_status()
+                auth_data = response.json()
+                self.token = auth_data.get("data", {}).get("token")
+                if not self.token:
+                    logger.error("未能从 Alist API 响应中获取令牌。")
+                    return
+                self.headers["Authorization"] = self.token
+            except httpx.HTTPStatusError as e:
+                logger.error(f"身份验证失败，状态码: {e.response.status_code}, 响应: {e.response.text}")
+                return
+            except Exception as e:
+                logger.error(f"身份验证时发生错误: {e}")
+                return
+            logger.info("身份验证成功，令牌已设置。")
+
     async def get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             logger.debug("Creating new httpx.AsyncClient instance.")
+            if not self.token:
+                await self.authenticate()
+            else:
+                self.headers["Authorization"] = self.token
+            
             self._client = httpx.AsyncClient(
                 base_url=self.host,
                 headers=self.headers,
@@ -281,18 +313,29 @@ class AlistPlugin(Star):
 
             host = self.config.get("alist_host")
             token = self.config.get("alist_token")
+            username = self.config.get("alist_username")
+            password = self.config.get("alist_password")
             timeout = self.config.get("timeout", 10)
 
             masked_token = f"{token[:5]}..." if token and len(token) > 5 else token
             logger.debug(f"Read config for async init - host: {host}, token: {masked_token}, timeout: {timeout}")
 
-            if not host or not token:
+            if not host:
                 logger.error("Alist host or token is missing or empty in plugin settings (async init).")
                 self.alist_client = None
                 return
 
             try:
-                self.alist_client = AlistClient(host=host, token=token, timeout=timeout)
+                if token:
+                    self.alist_client = AlistClient(host=host, token=token, timeout=timeout)
+                elif username and password:
+                    self.alist_client = AlistClient(host=host, username=username, password=password, timeout=timeout)
+                    await self.alist_client.authenticate()
+                else:
+                    logger.error("Alist token 或用户名/密码未配置，无法初始化客户端。")
+                    self.alist_client = None
+                    return
+                
                 logger.info(f"Alist client initialized asynchronously for host: {host}")
 
                 # --- Get user base path ---
@@ -575,7 +618,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list (assuming config provides it)
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -604,7 +647,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -747,7 +790,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -776,7 +819,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied for return command.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -840,7 +883,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -886,7 +929,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -932,7 +975,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -982,7 +1025,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -1010,7 +1053,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
@@ -1038,7 +1081,7 @@ class AlistPlugin(Star):
         # Get admin users directly as a list
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
-        if sender_id not in admin_users:
+        if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
