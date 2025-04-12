@@ -222,12 +222,32 @@ class AlistClient:
             logger.error(f"Error parsing storage_delete response: {e}, Response text: {response.text}", exc_info=True)
             return False
 
+    async def get_me(self) -> Optional[Dict[str, Any]]:
+        """Get current user information using /api/me."""
+        logger.debug("Calling /api/me")
+        result = await self._request("GET", "/me")
+        # The actual user data might be nested under 'data' or be the root object
+        if isinstance(result, dict):
+             # Check common nesting patterns
+             if "data" in result and isinstance(result["data"], dict):
+                 logger.debug(f"/api/me returned nested data: {result['data']}")
+                 return result["data"]
+             elif "id" in result: # Check if root object looks like user data
+                 logger.debug(f"/api/me returned root data: {result}")
+                 return result
+             else:
+                 logger.warning(f"/api/me returned unexpected dict structure: {result}")
+                 return None
+        else:
+            logger.error(f"/api/me did not return a dictionary: {result}")
+            return None
+
 # --- AstrBot Plugin ---
 @register(
     "astrbot_plugin_alist",
     "Cline (Generated)",
     "通过机器人查看alist，支持管理存储和搜索文件",
-    "1.2.0",  # Incremented version for history feature + admin fix
+    "1.2.1",  # Incremented version for history feature + admin fix
     ""
 )
 class AlistPlugin(Star):
@@ -241,6 +261,7 @@ class AlistPlugin(Star):
         self.last_search_state: Dict[str, List[Dict[str, Any]]] = {}
         self.search_state_timeout: int = 180 # Timeout for individual states remains
         self.max_history_depth = 10 # Limit how many levels deep we store
+        self.user_base_path: str = "/" # Default base path
 
         logger.debug("Creating task for _initialize_client")
         task_creator = getattr(context, 'create_task', asyncio.create_task)
@@ -273,11 +294,34 @@ class AlistPlugin(Star):
             try:
                 self.alist_client = AlistClient(host=host, token=token, timeout=timeout)
                 logger.info(f"Alist client initialized asynchronously for host: {host}")
+
+                # --- Get user base path ---
+                try:
+                    user_info = await self.alist_client.get_me()
+                    if user_info and isinstance(user_info, dict):
+                        base_path = user_info.get("base_path", "/")
+                        # Normalize the base path
+                        if not base_path: base_path = "/"
+                        if not base_path.startswith("/"): base_path = "/" + base_path
+                        # Keep trailing slash for joining, unless it's just "/"
+                        # if base_path != "/" and base_path.endswith("/"): base_path = base_path.rstrip("/")
+
+                        self.user_base_path = base_path
+                        logger.info(f"Successfully fetched user info. Base path set to: '{self.user_base_path}'")
+                    else:
+                        logger.warning(f"Failed to get valid user info from /api/me. Response: {user_info}. Using default base path '/'.")
+                        self.user_base_path = "/"
+                except Exception as me_e:
+                    logger.error(f"Error calling /api/me: {me_e}. Using default base path '/'.", exc_info=True)
+                    self.user_base_path = "/"
+                # --- End get user base path ---
+
             except Exception as e:
                 logger.error(f"Failed to create AlistClient object in async init: {e}", exc_info=True)
                 self.alist_client = None
+                self.user_base_path = "/" # Reset on client creation failure
 
-        logger.debug(f"Async initialization finished. Client is {'set' if self.alist_client else 'None'}.")
+        logger.debug(f"Async initialization finished. Client is {'set' if self.alist_client else 'None'}. Base path: '{self.user_base_path}'")
 
     async def _get_client(self) -> Optional[AlistClient]:
         logger.debug(f"Entering _get_client. Current client state: {'Initialized' if self.alist_client else 'None'}")
@@ -319,11 +363,21 @@ class AlistPlugin(Star):
         logger.info("Alist Plugin terminated.")
 
     async def _execute_api_call_and_format(self, event: AstrMessageEvent, client: AlistClient, page: int, per_page: int, parent: str = "/", keywords: Optional[str] = None) -> Optional[str]:
+        # 'parent' argument is now always RELATIVE to user's base_path for API calls
         is_search = keywords is not None
         api_call_type = "search" if is_search else "list"
         api_keywords = keywords if is_search else ""
 
-        logger.debug(f"Executing API helper - Type: {api_call_type}, API Keywords: '{api_keywords}', Page: {page}, PerPage: {per_page}, Parent: {parent}")
+        # Construct the path for display (absolute) by combining base_path and relative parent
+        if self.user_base_path == "/" or not self.user_base_path:
+             display_path = parent
+        elif parent == "/":
+             display_path = self.user_base_path.rstrip('/') or "/"
+        else:
+             display_path = f"{self.user_base_path.rstrip('/')}/{parent.lstrip('/')}"
+        display_path = re.sub(r'/+', '/', display_path) # Normalize display path
+
+        logger.debug(f"Executing API helper - Type: {api_call_type}, API Keywords: '{api_keywords}', Page: {page}, PerPage: {per_page}, Relative Parent for API: '{parent}', Display Path: '{display_path}'")
 
         full_content = []
         total = 0
@@ -347,7 +401,8 @@ class AlistPlugin(Star):
 
             if api_data is None:
                 action_desc = f"搜索 '{api_keywords}'" if is_search else "列出目录"
-                return f"❌ 在路径 '{parent}' 中{action_desc}时出错或未找到结果。"
+                # Show the user-friendly display path in error messages
+                return f"❌ 在路径 '{display_path}' 中{action_desc}时出错或未找到结果。"
 
             total_pages = math.ceil(total / per_page) if per_page > 0 else 1
 
@@ -361,12 +416,15 @@ class AlistPlugin(Star):
                 display_content = full_content[start_index:end_index] if per_page > 0 else full_content
 
             if not display_content and total > 0: # Handle case where page is out of bounds but total > 0
-                 return f"❎ 在路径 '{parent}' 的第 {page} 页没有找到结果 (共 {total_pages} 页)。"
+                 # Show the user-friendly display path in error messages
+                 return f"❎ 在路径 '{display_path}' 的第 {page} 页没有找到结果 (共 {total_pages} 页)。"
             elif not display_content:
                  action_desc = f"与 '{api_keywords}' 相关的文件" if is_search else "任何文件或文件夹"
-                 return f"❎ 在路径 '{parent}' 中未能找到{action_desc}。"
+                 # Show the user-friendly display path in error messages
+                 return f"❎ 在路径 '{display_path}' 中未能找到{action_desc}。"
 
-            reply_text = f"✅ 在 '{parent}' 中找到 {total} 个结果 (第 {page}/{total_pages} 页):\n"
+            # Show the user-friendly display path in the success message
+            reply_text = f"✅ 在 '{display_path}' 中找到 {total} 个结果 (第 {page}/{total_pages} 页):\n"
 
             # Calculate overall index for display based on current page and per_page
             page_start_index_display = (page - 1) * per_page
@@ -378,66 +436,73 @@ class AlistPlugin(Star):
                 size_str = self._format_size(item.get("size", 0)) if not is_dir else ""
                 name = item.get('name', '未知名称')
                 reply_text += f"\n{overall_index}. {item_type} {name} {'('+size_str+')' if size_str else ''}"
-                if not is_dir and client: # Check if client exists
+                if not is_dir and client:
+                    link = None
+                    raw_url = item.get("raw_url")
+                    name = item.get('name', '未知名称')
+                    sign = item.get("sign") # Check for sign first
+
                     try:
-                        # Determine the correct parent path based on operation type
-                        if is_search: # Search operation
-                            actual_parent_path = item.get("parent", "/") # Use parent from the search result item
-                        else: # List/Browse operation
-                            actual_parent_path = parent # Use the function's parent argument (current directory)
-                        logger.debug(f"Link Gen - Actual Parent: '{actual_parent_path}', Name: '{name}'")
-
-                        # Ensure path separators are correct for URL construction and API calls
-                        full_path = os.path.join(actual_parent_path, name).replace("\\", "/")
-                        # Ensure the path starts with a single '/'
-                        if not full_path.startswith("/"):
-                            full_path = "/" + full_path
-                        full_path = re.sub(r'/+', '/', full_path) # Replace multiple slashes with one
-                        logger.debug(f"Link Gen - Calculated Full Path: '{full_path}'")
-                        encoded_path = quote(full_path)
-
-                        link = None
-                        sign = item.get("sign") # 1. Check if sign is directly in the item (works for /list results)
-
-                        if sign:
-                            logger.debug(f"Found sign directly in item for {name}.")
-                            link = f"{client.host}/d{encoded_path}?sign={sign}"
+                        if raw_url and isinstance(raw_url, str) and raw_url.startswith(('http://', 'https://')):
+                            # 1. Use raw_url if available and looks valid
+                            logger.debug(f"Using raw_url for {name}: {raw_url}")
+                            link = raw_url
                         else:
-                            # 2. If no direct sign (likely /search result), try user's suggestion: list parent dir
-                            logger.debug(f"No direct sign for {name}. Attempting fallback via /fs/list on parent '{actual_parent_path}'.")
-                            try:
-                                # Ensure we use the correct parent path for the list call
-                                list_data = await client.list_directory(actual_parent_path)
-                                if list_data and isinstance(list_data.get('content'), list):
-                                    found_in_list = False
-                                    for listed_item in list_data['content']:
-                                        if listed_item.get('name') == name:
-                                            sign = listed_item.get("sign")
-                                            if sign:
-                                                logger.debug(f"Found sign for {name} via /fs/list fallback.")
-                                                link = f"{client.host}/d{encoded_path}?sign={sign}"
-                                                found_in_list = True
-                                                break # Found the matching item and its sign
-                                    if not found_in_list:
-                                        logger.warning(f"File '{name}' not found in parent directory '{actual_parent_path}' listing during fallback.")
+                            # 2. Construct link manually, differentiating between search and list/browse
+                            encoded_path_for_link = ""
+                            true_absolute_path = "" # Path relative to Alist root needed for the /d/ link
+
+                            if is_search:
+                                # For search results, use item's parent (usually absolute)
+                                item_parent_path = item.get("parent", "/")
+                                if item_parent_path == "/":
+                                    true_absolute_path = f"/{name}"
                                 else:
-                                    logger.warning(f"Failed to list parent directory '{actual_parent_path}' or invalid format during fallback. Response: {list_data}")
-                            except Exception as list_e:
-                                logger.error(f"Error during /fs/list fallback for parent '{actual_parent_path}': {list_e}", exc_info=True)
+                                    true_absolute_path = f"{item_parent_path.rstrip('/')}/{name}"
+                                # Normalize slashes
+                                true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
+                                logger.debug(f"Link Gen (Search) - Item Parent: '{item_parent_path}', True Absolute Path: '{true_absolute_path}'")
+                            else:
+                                # For list/browse results, combine base_path + relative parent + name
+                                current_dir_relative_to_base = parent # 'parent' arg is relative for list/browse
+                                # Combine current dir (relative to base) and name
+                                if current_dir_relative_to_base == "/":
+                                     item_path_relative_to_base = f"/{name}"
+                                else:
+                                     item_path_relative_to_base = f"{current_dir_relative_to_base.rstrip('/')}/{name}"
+                                # Combine user's base_path and the item's relative path for true absolute path
+                                if self.user_base_path == "/":
+                                     true_absolute_path = item_path_relative_to_base
+                                else:
+                                     # Ensure no double slashes when joining base and relative paths
+                                     true_absolute_path = f"{self.user_base_path.rstrip('/')}/{item_path_relative_to_base.lstrip('/')}"
+                                # Normalize slashes
+                                true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
+                                logger.debug(f"Link Gen (List/Browse) - User Base: '{self.user_base_path}', Current Dir Rel: '{current_dir_relative_to_base}', True Absolute Path: '{true_absolute_path}'")
 
-                        # 3. Fallback to unsigned link if all methods failed
-                        if not link and client.host:
-                            logger.debug(f"Falling back to constructing unsigned /d/ link for {name}")
-                            link = f"{client.host}/d{encoded_path}"
+                            # Encode the final absolute path
+                            encoded_path_for_link = quote(true_absolute_path)
 
-                        # Add the link or error message
+                            # Construct the base link using the correctly determined encoded path
+                            base_link = f"{client.host}/d{encoded_path_for_link}"
+
+                            if sign:
+                                # Append sign if available
+                                logger.debug(f"Using sign for {name}: {sign}")
+                                link = f"{base_link}?sign={sign}"
+                            else:
+                                # Fallback to unsigned link
+                                logger.debug(f"No sign found for {name}, using unsigned link.")
+                                link = base_link
+
+                        # Add the generated link or an error message
                         if link:
                             reply_text += f"\n  Link: {link}"
                         else:
-                            reply_text += f"\n  (无法获取下载链接)"
+                             reply_text += f"\n  (无法生成下载链接)"
 
                     except Exception as link_e:
-                        logger.error(f"General error generating link for {name} at path {full_path}: {link_e}", exc_info=True)
+                        logger.error(f"Error generating link for {name}: {link_e}", exc_info=True)
                         reply_text += f"\n  (生成链接时出错)"
 
             if total_pages > 1:
@@ -458,7 +523,7 @@ class AlistPlugin(Star):
                 new_state = {
                     "keywords": keywords,
                     "results": display_content, # Store only the *displayed* content for folder navigation
-                    "parent": parent,
+                    "parent": parent, # Store the RELATIVE path used for the API call
                     "current_page": page,
                     "total_pages": total_pages,
                     "timestamp": time.time(),
@@ -585,39 +650,87 @@ class AlistPlugin(Star):
                  return
 
             folder_name = selected_item.get("name")
-            # Determine the correct base path for constructing the new path
-            if state.get("keywords"): # If the current state is from a search result
-                parent_path = selected_item.get("parent", "/") # Use the item's own parent
-                logger.debug(f"Folder command from search result: using item's parent '{parent_path}'")
-            else: # If the current state is from a directory listing
-                parent_path = state.get("parent", "/") # Use the state's parent (the directory being viewed)
-                logger.debug(f"Folder command from list view: using state's parent '{parent_path}'")
+            if not folder_name:
+                 yield event.plain_result(f"❌ 无法获取序号 {index} 的文件夹名称。")
+                 return
 
-            if parent_path == "/":
-                new_parent = f"/{folder_name}"
+            # --- Determine the next parent path RELATIVE to user's base_path ---
+            next_parent_relative = "/" # Default path relative to base_path
+            was_search = state.get("keywords") is not None # Check if the *current* state was from a search
+
+            if was_search:
+                # If navigating from search, item['parent'] is absolute. Need to make it relative to base_path.
+                item_parent_absolute = selected_item.get("parent", "/")
+                # Construct the full absolute path of the folder being entered
+                item_full_absolute = os.path.join(item_parent_absolute, folder_name).replace("\\", "/")
+                item_full_absolute = re.sub(r'/+', '/', item_full_absolute) # Normalize
+
+                if self.user_base_path == "/":
+                    next_parent_relative = item_full_absolute
+                elif item_full_absolute.startswith(self.user_base_path):
+                    # Strip base_path prefix to get the relative path
+                    base_path_len = len(self.user_base_path)
+                    # Handle base_path potentially having or not having a trailing slash
+                    if self.user_base_path != "/" and not self.user_base_path.endswith('/'):
+                         base_path_len += 1 # Account for the implicit slash in the absolute path
+
+                    if len(item_full_absolute) >= base_path_len: # Use >= to handle entering base path itself
+                         next_parent_relative = "/" + item_full_absolute[base_path_len:].lstrip('/')
+                    else: # Should not happen if starts_with is true
+                         logger.warning(f"Path calculation error (search): '{item_full_absolute}' vs '{self.user_base_path}'")
+                         next_parent_relative = "/" # Fallback
+
+                    if not next_parent_relative.startswith("/"): # Ensure leading slash
+                         next_parent_relative = "/" + next_parent_relative
+                else:
+                    # This case might indicate an issue or edge case (e.g., search result outside base_path?)
+                    logger.warning(f"Search result item path '{item_full_absolute}' does not start with user base path '{self.user_base_path}'. API call might fail.")
+                    # Fallback: Use the calculated absolute path, though it might fail.
+                    # It's better to pass the relative path even if it seems wrong, as the API expects it.
+                    # Let's recalculate relative path assuming the item_parent_absolute was meant to be relative
+                    # This is a guess, the API behavior is inconsistent here.
+                    if item_parent_absolute == "/":
+                         next_parent_relative = f"/{folder_name}"
+                    else:
+                         next_parent_relative = f"{item_parent_absolute.rstrip('/')}/{folder_name}"
+
+                logger.debug(f"Folder command from search result: item abs path '{item_full_absolute}', calculated relative path for API: '{next_parent_relative}'")
             else:
-                new_parent = f"{parent_path.rstrip('/')}/{folder_name}"
+                # If navigating from list view, state['parent'] is already relative to base_path
+                current_parent_relative = state["parent"] # This is relative to base_path
+                if current_parent_relative == "/":
+                    next_parent_relative = f"/{folder_name}"
+                else:
+                    next_parent_relative = f"{current_parent_relative.rstrip('/')}/{folder_name}"
+                logger.debug(f"Folder command from list view: current relative parent '{current_parent_relative}', calculated next relative path for API: '{next_parent_relative}'")
 
-            if not new_parent.startswith("/") and new_parent != "/":
-                new_parent = "/" + new_parent
-            new_parent = new_parent.replace("//", "/")
+            # Normalize the final relative path
+            next_parent_relative = re.sub(r'/+', '/', next_parent_relative)
 
-            logger.debug(f"Entering folder: {new_parent}")
-
+            # --- Call API ---
             client = await self._get_client()
             if not client:
                 yield event.plain_result("❌ 错误：Alist 客户端未配置或初始化失败。")
                 return
 
             per_page = self.config.get("search_result_limit", 25)
-            yield event.plain_result(f"⏳ 正在进入并列出 '{new_parent}'...")
+            # Construct the display path by prepending base_path if necessary
+            if self.user_base_path == "/" or not self.user_base_path:
+                 display_entering_path = next_parent_relative
+            elif next_parent_relative == "/":
+                 display_entering_path = self.user_base_path.rstrip('/') or "/" # Handle base path being "/"
+            else:
+                 # Ensure no double slashes when joining base and relative paths
+                 display_entering_path = f"{self.user_base_path.rstrip('/')}/{next_parent_relative.lstrip('/')}"
+            display_entering_path = re.sub(r'/+', '/', display_entering_path) # Normalize display path
 
-            # Entering a folder always resets to page 1
+            yield event.plain_result(f"⏳ 正在进入并列出 '{display_entering_path}'...")
+
+            # Call helper with the path RELATIVE to base_path
             result_message = await self._execute_api_call_and_format(
-                event, client, page=1, per_page=per_page, parent=new_parent, keywords=None
+                event, client, page=1, per_page=per_page, parent=next_parent_relative, keywords=None
             )
             yield event.plain_result(result_message)
-
         except ValueError:
             yield event.plain_result(f"❌ 无效的序号 '{index_str}'。请输入一个数字。")
         except IndexError:
