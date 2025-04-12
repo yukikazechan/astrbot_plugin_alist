@@ -511,7 +511,7 @@ class AlistPlugin(Star):
                 reply_text += "\n\n➡️ 使用 /al fl <序号> 进入文件夹。"
             # Add return command hint if history exists
             sender_id = event.get_sender_id()
-            if sender_id and sender_id in self.last_search_state and len(self.last_search_state.get(sender_id, [])) > 1:
+            if sender_id and sender_id in self.last_search_state and len(self.last_search_state.get(sender_id, [])) > 0:
                  reply_text += "\n↩️ 使用 /al r 返回上一级。"
 
 
