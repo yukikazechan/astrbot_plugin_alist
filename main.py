@@ -164,6 +164,14 @@ class AlistClient:
              logger.error(f"Simple API unexpected error ({path}): {e}", exc_info=True)
              return None
 
+    async def get_file_info(self, path: str) -> Optional[Dict[str, Any]]:
+        payload = {
+            "path": path
+        }
+        logger.debug(f"Calling /api/fs/get with payload: {payload}")
+        result = await self._request("POST", "/fs/get", json=payload)
+        return result if isinstance(result, dict) else None
+    
     async def search(self, keywords: str, page: int = 1, per_page: int = 100, parent: str = "/") -> Optional[Dict[str, Any]]:
         """Search for files using /api/fs/search with pagination."""
         payload = {
@@ -535,8 +543,17 @@ class AlistPlugin(Star):
                                 link = f"{base_link}?sign={sign}"
                             else:
                                 # Fallback to unsigned link
-                                logger.debug(f"No sign found for {name}, using unsigned link.")
-                                link = base_link
+                                if self.user_base_path and true_absolute_path.startswith(self.user_base_path):
+                                    file_abs_path = true_absolute_path[len(self.user_base_path):].lstrip('/')
+                                else:
+                                    file_abs_path = true_absolute_path
+                                file_info = await client.get_file_info(file_abs_path)
+                                sign = file_info.get("sign")
+                                if sign:
+                                    link = f"{base_link}?sign={sign}"
+                                else:
+                                    logger.debug(f"No sign found for {name}, using unsigned link.")
+                                    link = base_link
 
                         # Add the generated link or an error message
                         if link:
