@@ -8,7 +8,19 @@
     "alist_token": {
         "description": "Alist API Token",
         "type": "string",
-        "hint": "在 Alist 后台管理 -> 设置 -> 其他 中查看或生成",
+        "hint": "在 Alist 后台管理 -> 设置 -> 其他 中查看或生成.为空则使用用户名登录",
+        "default": ""
+    },
+    "alist_username": {
+        "description": "Alist 用户名",
+        "type": "string",
+        "hint": "用于登录 Alist 的用户名",
+        "default": ""
+    },
+    "alist_password": {
+        "description": "Alist 密码",
+        "type": "string",
+        "hint": "用于登录 Alist 的密码",
         "default": ""
     },
     "search_result_limit": {
@@ -26,7 +38,7 @@
     "admin_users": {
         "description": "管理员用户 ID 列表",
         "type": "list",
-        "hint": "允许使用此插件所有命令的用户 ID 列表",
+        "hint": "允许使用此插件所有命令的用户 ID 列表.为空则不使用白名单",
         "default": []
     }
 }
