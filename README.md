@@ -26,7 +26,8 @@
 
 
     Alist API 地址: "YOUR_ALIST_URL"  # 必填：您的 Alist 服务地址，例如 https://alist.example.com 或 http://192.168.1.100:5244
-    Alist API Token: "YOUR_ALIST_API_TOKEN" # 必填：用于访问 Alist API 的令牌
+    Alist API Token: "YOUR_ALIST_API_TOKEN" # （二选一）：用于访问 Alist API 的令牌
+    Alist 用户名&Alist 密码 # （二选一）：通过/api/auth/login获取token
     文件列表单页数量: 10 # 可选：每次搜索或列目录时每页显示的项目数量，默认为 10
     API 请求超时时间 (秒): 10 # 可选：连接 Alist API 的超时时间（秒），默认为 10
     管理员用户 ID 列表（v1.2更新）：只允许在列表中的id调用用alist命令
