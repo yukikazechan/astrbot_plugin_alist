@@ -1,20 +1,25 @@
-import httpx
-import asyncio
+import httpx 
+import asyncio 
 from typing import List, Optional, Dict, Any
 from urllib.parse import quote
 import math
 import re
 import time
 import os
+import io 
+import pathlib 
+import tempfile 
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event.filter import event_message_type, EventMessageType 
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Plain, Image, At
 from astrbot.core.config import AstrBotConfig
+from astrbot.api.message_components import File 
+from astrbot.api.event import MessageChain 
 import logging
 from logging import FileHandler, Formatter
 
-# --- Logging Setup ---
 log_dir = os.path.dirname(__file__)
 log_file_path = os.path.join(log_dir, 'log.txt')
 
@@ -117,18 +122,16 @@ class AlistClient:
             logger.debug(f"Alist API Response Data (type: {type(data)}): {data}")
             if isinstance(data, dict) and "code" in data:
                 if data.get("code") == 200:
-                    # Handle cases where data might be directly under 'data' or the root
                     return data.get("data") if "data" in data else data
                 else:
                     logger.error(f"Alist API error ({path}): Code {data.get('code')} - {data.get('message', 'Unknown error')}. Response: {data}")
                     return None
             elif isinstance(data, list) and response.status_code == 200:
                  logger.debug(f"Alist API ({path}) returned a list directly, assuming success.")
-                 # Wrap list in a dict consistent with other responses if needed by caller
-                 return {"content": data, "total": len(data)} # Or just return data if caller handles lists
+                 return {"content": data, "total": len(data)} 
             elif response.status_code == 200:
                  logger.warning(f"Alist API ({path}) returned an unexpected successful response format: {data}")
-                 return data # Return data as is, let caller handle
+                 return data 
             else:
                  logger.error(f"Alist API returned unexpected status {response.status_code} with data: {data}")
                  return None
@@ -178,11 +181,10 @@ class AlistClient:
             "parent": parent,
             "keywords": keywords,
             "page": page,
-            "per_page": max(1, per_page)  # Ensure per_page is at least 1
+            "per_page": max(1, per_page)  
         }
         logger.debug(f"Calling /api/fs/search with payload: {payload}")
         result = await self._request("POST", "/fs/search", json=payload)
-        # Ensure the result is a dict, even if _request returns root data
         return result if isinstance(result, dict) else None
 
     async def list_directory(self, path: str) -> Optional[Dict[str, Any]]:
@@ -191,17 +193,15 @@ class AlistClient:
             "path": path,
             "password": "",
             "page": 1,
-            "per_page": 0, # Fetch all items
+            "per_page": 0, 
             "refresh": False
         }
         logger.debug(f"Calling /api/fs/list with per_page=0 and raw path: {path}")
         result = await self._request("POST", "/fs/list", json=payload)
-        # Ensure the result is a dict, even if _request returns root data
         return result if isinstance(result, dict) else None
 
     async def storage_list(self) -> Optional[List[Dict[str, Any]]]:
         result_data = await self._request("GET", "/admin/storage/list")
-        # Handle both direct list and nested content structure
         if isinstance(result_data, dict) and 'content' in result_data and isinstance(result_data['content'], list):
             logger.debug(f"Extracted storage list from result_data['content']. Total items: {result_data.get('total', 'N/A')}")
             return result_data['content']
@@ -266,13 +266,11 @@ class AlistClient:
         """Get current user information using /api/me."""
         logger.debug("Calling /api/me")
         result = await self._request("GET", "/me")
-        # The actual user data might be nested under 'data' or be the root object
         if isinstance(result, dict):
-             # Check common nesting patterns
              if "data" in result and isinstance(result["data"], dict):
                  logger.debug(f"/api/me returned nested data: {result['data']}")
                  return result["data"]
-             elif "id" in result: # Check if root object looks like user data
+             elif "id" in result: 
                  logger.debug(f"/api/me returned root data: {result}")
                  return result
              else:
@@ -282,12 +280,79 @@ class AlistClient:
             logger.error(f"/api/me did not return a dictionary: {result}")
             return None
 
-# --- AstrBot Plugin ---
+    async def upload_file(self, destination_path: str, file_content: bytes, file_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Uploads a file to the specified Alist path using /api/fs/put (streaming).
+
+        Args:
+            destination_path: The full destination path on Alist (e.g., "/mydir/myfile.txt").
+                               This path should NOT be URL encoded here.
+            file_content: The raw bytes content of the file to upload.
+            file_name: The name of the file being uploaded (used for logging/debugging).
+
+        Returns:
+            A dictionary containing the API response on success, None on failure.
+        """
+        client = await self.get_client()
+        encoded_path = quote(destination_path)
+        upload_url = "/api/fs/put" 
+
+
+        upload_headers = self.headers.copy() 
+        upload_headers["File-Path"] = encoded_path
+
+        logger.debug(f"Attempting to upload '{file_name}' to Alist path: '{destination_path}' (Encoded: '{encoded_path}')")
+        logger.debug(f"Upload URL: {self.host}{upload_url}")
+        logger.debug(f"Upload Headers: { {k: (v[:10] + '...' if k == 'Authorization' else v) for k, v in upload_headers.items()} }") # Mask token in log
+
+        try:
+            response = await client.put(
+                upload_url,
+                content=file_content,
+                headers=upload_headers,
+                timeout=None 
+            )
+            logger.debug(f"Alist Upload API Response Status: {response.status_code}")
+            logger.debug(f"Alist Upload API Response Headers: {response.headers}")
+            logger.debug(f"Alist Upload API Response Body: {response.text}") # Log raw response text
+
+            response.raise_for_status() # Raise exception for 4xx/5xx responses
+
+            try:
+                data = response.json()
+                logger.debug(f"Alist Upload API Response JSON Data: {data}")
+                if isinstance(data, dict) and data.get("code") == 200:
+                    logger.info(f"Successfully uploaded '{file_name}' to '{destination_path}'. Message: {data.get('message')}")
+                    return data # Return the full response dict
+                else:
+                    error_message = data.get('message', 'Unknown API error') if isinstance(data, dict) else 'Invalid response format'
+                    logger.error(f"Alist API error during upload ({destination_path}): Code {data.get('code', 'N/A')} - {error_message}. Response: {data}")
+                    return None
+            except Exception as json_e: # Catch JSONDecodeError or other parsing issues
+                 logger.error(f"Failed to parse Alist upload response as JSON ({destination_path}): {json_e}. Response text: {response.text}")
+                 # Check status code again, maybe 200 OK without JSON body means success?
+                 if response.status_code == 200:
+                     logger.warning(f"Upload to '{destination_path}' returned status 200 but no valid JSON body. Assuming success based on status code.")
+                     # Return a generic success structure or None depending on expected behavior
+                     return {"code": 200, "message": "Upload successful (assumed from status code)", "data": None}
+                 else:
+                     return None # Failed if not 200 and not valid JSON
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Alist Upload HTTP Status Error ({destination_path}): {e.response.status_code}. Response: {e.response.text}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Alist Upload Request Error ({destination_path}): {type(e).__name__} - {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Alist Upload unexpected error ({destination_path}): {e}", exc_info=True)
+            return None
+
 @register(
     "astrbot_plugin_alist",
     "Cline (Generated)",
     "通过机器人查看alist，支持管理存储和搜索文件",
-    "1.2.1",  # Incremented version for history feature + admin fix
+    "1.2.2",  # Incremented version for history feature + admin fix
     ""
 )
 class AlistPlugin(Star):
@@ -302,6 +367,11 @@ class AlistPlugin(Star):
         self.search_state_timeout: int = 180 # Timeout for individual states remains
         self.max_history_depth = 10 # Limit how many levels deep we store
         self.user_base_path: str = "/" # Default base path
+
+        # --- Additions for Upload ---
+        self.upload_requests: Dict[tuple[str, str], Dict[str, Any]] = {} # Key: (sender_id, group_id), Value: {"timestamp": float, "path": str}
+        self.upload_timeout: int = 180 # 3 minutes timeout for upload
+        # --- End Additions ---
 
         logger.debug("Creating task for _initialize_client")
         task_creator = getattr(context, 'create_task', asyncio.create_task)
@@ -346,7 +416,6 @@ class AlistPlugin(Star):
                 
                 logger.info(f"Alist client initialized asynchronously for host: {host}")
 
-                # --- Get user base path ---
                 try:
                     user_info = await self.alist_client.get_me()
                     if user_info and isinstance(user_info, dict):
@@ -354,8 +423,6 @@ class AlistPlugin(Star):
                         # Normalize the base path
                         if not base_path: base_path = "/"
                         if not base_path.startswith("/"): base_path = "/" + base_path
-                        # Keep trailing slash for joining, unless it's just "/"
-                        # if base_path != "/" and base_path.endswith("/"): base_path = base_path.rstrip("/")
 
                         self.user_base_path = base_path
                         logger.info(f"Successfully fetched user info. Base path set to: '{self.user_base_path}'")
@@ -365,12 +432,11 @@ class AlistPlugin(Star):
                 except Exception as me_e:
                     logger.error(f"Error calling /api/me: {me_e}. Using default base path '/'.", exc_info=True)
                     self.user_base_path = "/"
-                # --- End get user base path ---
 
             except Exception as e:
                 logger.error(f"Failed to create AlistClient object in async init: {e}", exc_info=True)
                 self.alist_client = None
-                self.user_base_path = "/" # Reset on client creation failure
+                self.user_base_path = "/"
 
         logger.debug(f"Async initialization finished. Client is {'set' if self.alist_client else 'None'}. Base path: '{self.user_base_path}'")
 
@@ -414,12 +480,10 @@ class AlistPlugin(Star):
         logger.info("Alist Plugin terminated.")
 
     async def _execute_api_call_and_format(self, event: AstrMessageEvent, client: AlistClient, page: int, per_page: int, parent: str = "/", keywords: Optional[str] = None) -> Optional[str]:
-        # 'parent' argument is now always RELATIVE to user's base_path for API calls
         is_search = keywords is not None
         api_call_type = "search" if is_search else "list"
         api_keywords = keywords if is_search else ""
 
-        # Construct the path for display (absolute) by combining base_path and relative parent
         if self.user_base_path == "/" or not self.user_base_path:
              display_path = parent
         elif parent == "/":
@@ -445,9 +509,18 @@ class AlistPlugin(Star):
                 # For directory listing, fetch all results and paginate client-side
                 api_data = await client.list_directory(path=parent)
                 if api_data:
-                    full_content = api_data.get("content", [])
-                    # Use total from API if available, otherwise fallback to len(full_content)
-                    total = api_data.get("total", len(full_content))
+                    full_content = api_data.get("content") # Get content, might be None
+                    # Calculate total based on API response or fetched content length
+                    total_from_api = api_data.get("total")
+                    if total_from_api is not None:
+                         total = total_from_api
+                    elif isinstance(full_content, list): # Check if full_content is a list before len()
+                         total = len(full_content)
+                    else:
+                         total = 0 # Default to 0 if content is None or not a list
+                         logger.warning(f"API response for '{parent}' had no 'total' and 'content' was not a list (content: {full_content!r}). Setting total items to 0.")
+                    # Ensure full_content is a list for later processing, even if it was None
+                    full_content = full_content if isinstance(full_content, list) else []
                     logger.debug(f"List directory successful. Total items reported: {total}, Fetched: {len(full_content)}")
 
             if api_data is None:
@@ -458,7 +531,6 @@ class AlistPlugin(Star):
             total_pages = math.ceil(total / per_page) if per_page > 0 else 1
 
             if is_search:
-                # For search, use the API-provided content directly (already paginated)
                 display_content = full_content
             else:
                 # For listing, paginate client-side from the full_content
@@ -466,128 +538,181 @@ class AlistPlugin(Star):
                 end_index = start_index + per_page
                 display_content = full_content[start_index:end_index] if per_page > 0 else full_content
 
-            if not display_content and total > 0: # Handle case where page is out of bounds but total > 0
+            reply_text = ""
+            is_empty_directory = not is_search and total == 0 and page == 1
+
+            if not display_content and total > 0 and not is_empty_directory: # Page out of bounds
                  # Show the user-friendly display path in error messages
-                 return f"❎ 在路径 '{display_path}' 的第 {page} 页没有找到结果 (共 {total_pages} 页)。"
-            elif not display_content:
-                 action_desc = f"与 '{api_keywords}' 相关的文件" if is_search else "任何文件或文件夹"
+                 return f"❎ 在路径 '{display_path}' 的第 {page} 页没有找到结果 (共 {total_pages} 页)。" # Return early, state should not update
+            elif not display_content and is_search: # Empty search results
+                 action_desc = f"与 '{api_keywords}' 相关的文件"
                  # Show the user-friendly display path in error messages
-                 return f"❎ 在路径 '{display_path}' 中未能找到{action_desc}。"
+                 return f"❎ 在路径 '{display_path}' 中未能找到{action_desc}。" # Return early, state should not update
+            elif is_empty_directory: # Empty directory listing
+                 logger.info(f"Directory '{display_path}' is empty.")
+                 reply_text = f"✅ 目录 '{display_path}' 为空。\n" # Set message, but DO NOT return yet
+                 # Proceed to state saving below
+            elif not display_content and not is_empty_directory: # Should not happen if previous conditions are correct, but as a fallback
+                 logger.warning(f"Unexpected empty display_content case for '{display_path}'. Total: {total}, Page: {page}")
+                 return f"❎ 在路径 '{display_path}' 中未能找到任何内容。" # Return early
 
-            # Show the user-friendly display path in the success message
-            reply_text = f"✅ 在 '{display_path}' 中找到 {total} 个结果 (第 {page}/{total_pages} 页):\n"
+            if not is_empty_directory: # Only build the list if it's not an empty directory
+                 # Show the user-friendly display path in the success message
+                 reply_text = f"✅ 在 '{display_path}' 中找到 {total} 个结果 (第 {page}/{total_pages} 页):\n"
 
-            # Calculate overall index for display based on current page and per_page
-            page_start_index_display = (page - 1) * per_page
+                 # Calculate overall index for display based on current page and per_page
+                 page_start_index_display = (page - 1) * per_page
 
-            for i, item in enumerate(display_content):
-                overall_index = page_start_index_display + i + 1 # Index relative to the whole list/search
-                is_dir = item.get("is_dir", False)
-                item_type = "📁" if is_dir else "📄"
-                size_str = self._format_size(item.get("size", 0)) if not is_dir else ""
-                name = item.get('name', '未知名称')
-                reply_text += f"\n{overall_index}. {item_type} {name} {'('+size_str+')' if size_str else ''}"
-                if not is_dir and client:
-                    link = None
-                    raw_url = item.get("raw_url")
-                    name = item.get('name', '未知名称')
-                    sign = item.get("sign") # Check for sign first
+                 for i, item in enumerate(display_content):
+                      # --- Item Formatting Loop ---
+                      overall_index = page_start_index_display + i + 1 # Index relative to the whole list/search
+                      is_dir = item.get("is_dir", False)
+                      item_type = "📁" if is_dir else "📄"
+                      size_str = self._format_size(item.get("size", 0)) if not is_dir else ""
+                      name = item.get('name', '未知名称')
+                      reply_text += f"\n{overall_index}. {item_type} {name} {'('+size_str+')' if size_str else ''}"
+                      if not is_dir and client:
+                          link = None
+                          raw_url = item.get("raw_url")
+                          # name = item.get('name', '未知名称') # Already got name above
+                          sign = item.get("sign") # Check for sign first
 
-                    try:
-                        if raw_url and isinstance(raw_url, str) and raw_url.startswith(('http://', 'https://')):
-                            # 1. Use raw_url if available and looks valid
-                            logger.debug(f"Using raw_url for {name}: {raw_url}")
-                            link = raw_url
-                        else:
-                            # 2. Construct link manually, differentiating between search and list/browse
-                            encoded_path_for_link = ""
-                            true_absolute_path = "" # Path relative to Alist root needed for the /d/ link
+                          try:
+                              if raw_url and isinstance(raw_url, str) and raw_url.startswith(('http://', 'https://')):
+                                  # 1. Use raw_url if available and looks valid
+                                  logger.debug(f"Using raw_url for {name}: {raw_url}")
+                                  link = raw_url
+                              else:
+                                  # 2. Construct link manually, handling search results specifically for get_file_info path
+                                  encoded_path_for_link = ""
+                                  true_absolute_path = "" # Path relative to Alist root needed for the /d/ link URL
+                                  path_for_get_info = "" # Path potentially without base_path for get_file_info
 
-                            if is_search:
-                                # For search results, use item's parent (usually absolute)
-                                item_parent_path = item.get("parent", "/")
-                                if item_parent_path == "/":
-                                    true_absolute_path = f"/{name}"
-                                else:
-                                    true_absolute_path = f"{item_parent_path.rstrip('/')}/{name}"
-                                # Normalize slashes
-                                true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
-                                logger.debug(f"Link Gen (Search) - Item Parent: '{item_parent_path}', True Absolute Path: '{true_absolute_path}'")
-                            else:
-                                # For list/browse results, combine base_path + relative parent + name
-                                current_dir_relative_to_base = parent # 'parent' arg is relative for list/browse
-                                # Combine current dir (relative to base) and name
-                                if current_dir_relative_to_base == "/":
-                                     item_path_relative_to_base = f"/{name}"
-                                else:
-                                     item_path_relative_to_base = f"{current_dir_relative_to_base.rstrip('/')}/{name}"
-                                # Combine user's base_path and the item's relative path for true absolute path
-                                if self.user_base_path == "/":
-                                     true_absolute_path = item_path_relative_to_base
-                                else:
-                                     # Ensure no double slashes when joining base and relative paths
-                                     true_absolute_path = f"{self.user_base_path.rstrip('/')}/{item_path_relative_to_base.lstrip('/')}"
-                                # Normalize slashes
-                                true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
-                                logger.debug(f"Link Gen (List/Browse) - User Base: '{self.user_base_path}', Current Dir Rel: '{current_dir_relative_to_base}', True Absolute Path: '{true_absolute_path}'")
+                                  # Determine the correct absolute path for the item
+                                  if is_search:
+                                       # For search results, item['parent'] is the absolute parent path
+                                       item_parent_path = item.get("parent", "/")
+                                       if item_parent_path == "/":
+                                           true_absolute_path = f"/{name}"
+                                       else:
+                                           true_absolute_path = f"{item_parent_path.rstrip('/')}/{name}"
+                                       
+                                       # --- Calculate path for get_file_info (without base_path if applicable) ---
+                                       if self.user_base_path and self.user_base_path != "/" and true_absolute_path.startswith(self.user_base_path):
+                                            path_for_get_info = "/" + true_absolute_path[len(self.user_base_path):].lstrip('/')
+                                            path_for_get_info = re.sub(r'/+', '/', path_for_get_info) # Normalize
+                                       else:
+                                            path_for_get_info = true_absolute_path # Use absolute if base is "/" or path doesn't start with base
+                                       logger.debug(f"Link Gen (Search) - Path for get_file_info: '{path_for_get_info}'")
+                                       # --- End calculation for get_file_info path ---
 
-                            # Encode the final absolute path
-                            encoded_path_for_link = quote(true_absolute_path)
+                                  else:
+                                       # For list results, 'parent' holds the current absolute directory
+                                       current_absolute_dir = parent
+                                       if current_absolute_dir == "/":
+                                           true_absolute_path = f"/{name}"
+                                       else:
+                                           true_absolute_path = f"{current_absolute_dir.rstrip('/')}/{name}"
+                                       # For list results, calculate path relative to base_path for get_file_info
+                                       if self.user_base_path and self.user_base_path != "/" and true_absolute_path.startswith(self.user_base_path):
+                                            path_for_get_info = "/" + true_absolute_path[len(self.user_base_path):].lstrip('/')
+                                            path_for_get_info = re.sub(r'/+', '/', path_for_get_info) # Normalize
+                                            if not path_for_get_info : path_for_get_info = "/" # Handle base path itself
+                                       else:
+                                            path_for_get_info = true_absolute_path # Use absolute if base is "/" or path doesn't start with base
+                                       logger.debug(f"Link Gen (List) - Path for get_file_info: '{path_for_get_info}'")
 
-                            # Construct the base link using the correctly determined encoded path
-                            base_link = f"{client.host}/d{encoded_path_for_link}"
 
-                            if sign:
-                                # Append sign if available
-                                logger.debug(f"Using sign for {name}: {sign}")
-                                link = f"{base_link}?sign={sign}"
-                            else:
-                                # Fallback to unsigned link
-                                if self.user_base_path and true_absolute_path.startswith(self.user_base_path):
-                                    file_abs_path = true_absolute_path[len(self.user_base_path):].lstrip('/')
-                                else:
-                                    file_abs_path = true_absolute_path
-                                file_info = await client.get_file_info(file_abs_path)
-                                sign = file_info.get("sign")
-                                if sign:
-                                    link = f"{base_link}?sign={sign}"
-                                else:
-                                    logger.debug(f"No sign found for {name}, using unsigned link.")
-                                    link = base_link
+                                  # Normalize the absolute path used for the final link URL
+                                  true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
+                                  logger.debug(f"Link Gen - IsSearch: {is_search}, Item Name: '{name}', True Absolute Path for URL: '{true_absolute_path}'")
 
-                        # Add the generated link or an error message
-                        if link:
-                            reply_text += f"\n  Link: {link}"
-                        else:
-                             reply_text += f"\n  (无法生成下载链接)"
+                                  # --- Get sign using the path RELATIVE to user base path ---
+                                  sign = None # Initialize sign
+                                  # Calculate the path relative to base_path for the get_file_info call
+                                  path_for_get_info = true_absolute_path # Default to absolute path
+                                  if self.user_base_path and self.user_base_path != "/" and true_absolute_path.startswith(self.user_base_path):
+                                       path_for_get_info = "/" + true_absolute_path[len(self.user_base_path):].lstrip('/')
+                                       path_for_get_info = re.sub(r'/+', '/', path_for_get_info) # Normalize
+                                       if not path_for_get_info : path_for_get_info = "/" # Handle base path itself
+                                  
+                                  logger.debug(f"Attempting to fetch sign using path relative to base: '{path_for_get_info}' (derived from absolute: '{true_absolute_path}')")
+                                  try:
+                                      # Call get_file_info ONLY with the calculated relative path
+                                      file_info = await client.get_file_info(path_for_get_info)
+                                      if isinstance(file_info, dict) and file_info:
+                                          sign = file_info.get("sign") # Get sign from the result
+                                          if sign:
+                                               logger.debug(f"Fetched sign for {name} using path '{path_for_get_info}': {sign}")
+                                          else:
+                                               logger.debug(f"get_file_info succeeded for '{path_for_get_info}' but no sign found.")
+                                      else:
+                                          logger.warning(f"get_file_info did not return valid data for {name} using path '{path_for_get_info}'. file_info: {file_info}")
+                                  except Exception as get_info_e:
+                                       logger.error(f"Error calling get_file_info for path '{path_for_get_info}': {get_info_e}", exc_info=True)
+                                       # Keep sign as None if fetching fails
+                                  # --- End get sign ---
 
-                    except Exception as link_e:
-                        logger.error(f"Error generating link for {name}: {link_e}", exc_info=True)
-                        reply_text += f"\n  (生成链接时出错)"
+                                  # --- Construct the final link URL ensuring base path is included ---
+                                  # true_absolute_path should be the correct absolute path (e.g., /tera/file.txt) calculated earlier
+                                  link_path_for_url = true_absolute_path
+                                  
+                                  # Double-check and enforce base path prefix for the final URL construction
+                                  if self.user_base_path and self.user_base_path != "/" and not link_path_for_url.startswith(self.user_base_path):
+                                      logger.warning(f"Final link path '{link_path_for_url}' is missing base path '{self.user_base_path}'. Force prepending for URL.")
+                                      link_path_for_url = f"{self.user_base_path.rstrip('/')}/{link_path_for_url.lstrip('/')}"
+                                      link_path_for_url = re.sub(r'/+', '/', link_path_for_url) # Normalize
 
+                                  logger.debug(f"Final path used for link URL construction: '{link_path_for_url}'")
+                                  # --- End final link path construction ---
+
+                                  encoded_path_for_link = quote(link_path_for_url) # Use the ensured absolute path
+                                  base_link = f"{client.host}/d{encoded_path_for_link}"
+                                  if sign: # Use the sign obtained using the relative path
+                                      link = f"{base_link}?sign={sign}"
+                                      logger.debug(f"Generated signed link for {name}: {link}")
+                                  else:
+                                      link = base_link
+                                      logger.debug(f"No sign fetched for {name} (used path '{path_for_get_info}' for get_info), using unsigned link.")
+
+                              # Add the generated link or an error message
+                              if link:
+                                  reply_text += f"\n  Link: {link}"
+                              else:
+                                   reply_text += f"\n  (无法生成下载链接)"
+
+                          except Exception as link_e:
+                              logger.error(f"Error generating link for {name}: {link_e}", exc_info=True)
+                              reply_text += f"\n  (生成链接时出错)"
+                      # --- End Item Formatting Loop ---
+
+            # --- Add navigation hints ---
             if total_pages > 1:
-                reply_text += f"\n\n📄 使用 /al np 翻页 (下一页), /al lp 翻页 (上一页)。 (共 {total_pages} 页)"
+                 reply_text += f"\n\n📄 使用 /al np 翻页 (下一页), /al lp 翻页 (上一页)。 (共 {total_pages} 页)"
+            # Only show folder navigation hint if there are actual folders displayed OR if it's an empty dir
+            # Updated logic: Only show folder hint if there are actual folders displayed.
             if any(item.get("is_dir") for item in display_content):
-                reply_text += "\n\n➡️ 使用 /al fl <序号> 进入文件夹。"
+                 reply_text += "\n\n➡️ 使用 /al fl <序号> 进入文件夹。"
             # Add return command hint if history exists
-            sender_id = event.get_sender_id()
+            sender_id = event.get_sender_id() # Get sender_id again for state saving
             if sender_id and sender_id in self.last_search_state and len(self.last_search_state.get(sender_id, [])) > 0:
                  reply_text += "\n↩️ 使用 /al r 返回上一级。"
 
 
             # --- State Saving Logic ---
+            # This part should execute even for empty directories
             if sender_id:
                 # Get or initialize the state history list for the user
                 user_history = self.last_search_state.setdefault(sender_id, [])
 
                 new_state = {
                     "keywords": keywords,
-                    "results": display_content, # Store only the *displayed* content for folder navigation
-                    "parent": parent, # Store the RELATIVE path used for the API call
+                    "results": display_content, # Store only the *displayed* content (empty for empty dir)
+                    "parent": parent, # Store the ABSOLUTE path used for the API call
                     "current_page": page,
                     "total_pages": total_pages,
                     "timestamp": time.time(),
-                    "total": total, # Store total for pagination and folder nav checks
+                    "total": total, # Store total (will be 0 for empty dir)
                 }
 
                 # Determine if the new state represents pagination or a new view
@@ -612,7 +737,7 @@ class AlistPlugin(Star):
                     user_history[-1]["current_page"] = page
                     user_history[-1]["timestamp"] = new_state["timestamp"]
                     user_history[-1]["results"] = new_state["results"] # Update displayed results
-                elif is_new_view: # Only append if it's genuinely a new view
+                elif is_new_view: # Only append if it's genuinely a new view (including entering an empty dir)
                     # Append the new state, representing a new view (search, folder entry, or first view)
                     logger.debug(f"Appending new state for user {sender_id}: parent '{parent}', keywords '{keywords}', page {page}/{total_pages}")
                     user_history.append(new_state)
@@ -623,7 +748,7 @@ class AlistPlugin(Star):
             else:
                  logger.warning("Could not get sender ID from event, state not stored.")
 
-            return reply_text
+            return reply_text.strip() # Return the final message (could be empty dir message or list)
 
         except Exception as e:
             logger.error(f"Error during API call execution/formatting: {e}", exc_info=True)
@@ -986,6 +1111,511 @@ class AlistPlugin(Star):
         result_message = await self._execute_api_call_and_format(event, client, prev_page, per_page, parent, keywords=keywords)
         yield event.plain_result(result_message)
 
+    @filter.command("al dl", alias={'alist dl', 'al download', 'alist download'})
+    async def download_command(self, event: AstrMessageEvent, index_str: str):
+        """根据序号下载文件并通过 AstrBot 发送。"""
+        admin_users = self.config.get("admin_users", [])
+        sender_id = event.get_sender_id()
+        if admin_users and sender_id not in admin_users: # Check admin_users only if it's configured
+            logger.warning(f"User {sender_id} is not an admin, access denied for download command.")
+            yield event.plain_result("没有权限使用此命令。")
+            return
+        logger.debug(f"download_command called by user {sender_id} with index string: {index_str}")
+
+        if not sender_id:
+            yield event.plain_result("❌ 无法获取用户信息。")
+            return
+        if sender_id not in self.last_search_state or not self.last_search_state[sender_id]:
+            yield event.plain_result("❌ 没有导航历史记录。请先使用 /al s 或 /al home。")
+            return
+
+        user_history = self.last_search_state[sender_id]
+        state = user_history[-1]
+        if (time.time() - state["timestamp"]) > self.search_state_timeout:
+            yield event.plain_result("❌ 上次操作已超时 (3分钟)。请重新使用 /al s 或 /al home。")
+            return
+
+        try:
+            index = int(index_str)
+            total_items_in_view = state.get("total", 0) # 使用 state 中的 total
+            if not (0 < index <= total_items_in_view):
+                 yield event.plain_result(f"❌ 无效的序号 '{index}'。请从 1 到 {total_items_in_view} 中选择。")
+                 return
+
+            per_page = self.config.get("search_result_limit", 25)
+            page_start_index = (state["current_page"] - 1) * per_page + 1
+            relative_index = index - page_start_index
+            if not (0 <= relative_index < len(state.get("results", []))):
+                yield event.plain_result(f"❌ 序号 {index} 不在当前页 (第 {state['current_page']} 页) 的缓存结果中。请尝试翻页或重新搜索。")
+                return
+
+            selected_item = state["results"][relative_index]
+
+            if selected_item.get("is_dir"):
+                 yield event.plain_result(f"❌ 不能下载文件夹 (序号 {index}: '{selected_item.get('name')}').")
+                 return
+
+            client = await self._get_client()
+            if not client:
+                yield event.plain_result("❌ 错误：Alist 客户端未配置或初始化失败。")
+                return
+
+            yield event.plain_result(f"⏳ 正在获取文件链接 (序号 {index}: '{selected_item.get('name')}')...")
+
+            link = None
+            name = selected_item.get('name', '未知名称')
+            raw_url = selected_item.get("raw_url")
+            sign = selected_item.get("sign") # Get sign from item first
+
+            try:
+                if raw_url and isinstance(raw_url, str) and raw_url.startswith(('http://', 'https://')):
+                    logger.debug(f"Using raw_url for download: {raw_url}")
+                    link = raw_url
+                else:
+                    # Replicate path calculation logic from _execute_api_call_and_format
+                    true_absolute_path = ""
+                    is_search = state.get("keywords") is not None
+                    parent = state["parent"] # Parent from the state
+
+                    if is_search:
+                        item_parent_path = selected_item.get("parent", "/") # Use parent from item for search
+                        if item_parent_path == "/":
+                            true_absolute_path = f"/{name}"
+                        else:
+                            true_absolute_path = f"{item_parent_path.rstrip('/')}/{name}"
+                        true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
+                        logger.debug(f"DL Link Gen (Search) - Item Parent: '{item_parent_path}', True Absolute Path: '{true_absolute_path}'")
+                    else: # List/Browse
+                        current_dir_relative_to_base = parent # 'parent' from state is relative for list/browse
+                        if current_dir_relative_to_base == "/":
+                             item_path_relative_to_base = f"/{name}"
+                        else:
+                             item_path_relative_to_base = f"{current_dir_relative_to_base.rstrip('/')}/{name}"
+                        if self.user_base_path == "/":
+                             true_absolute_path = item_path_relative_to_base
+                        else:
+                             true_absolute_path = f"{self.user_base_path.rstrip('/')}/{item_path_relative_to_base.lstrip('/')}"
+                        true_absolute_path = re.sub(r'/+', '/', true_absolute_path)
+                        logger.debug(f"DL Link Gen (List/Browse) - User Base: '{self.user_base_path}', Current Dir Rel: '{current_dir_relative_to_base}', True Absolute Path: '{true_absolute_path}'")
+
+                    encoded_path_for_link = quote(true_absolute_path)
+                    base_link = f"{client.host}/d{encoded_path_for_link}"
+
+                    if sign:
+                        logger.debug(f"Using sign from item for download: {sign}")
+                        link = f"{base_link}?sign={sign}"
+                    else:
+                        # Attempt to get sign via get_file_info
+                        logger.debug(f"No sign in item for {name}, attempting get_file_info...")
+                        # Calculate file_abs_path for get_file_info (matching existing logic)
+                        if self.user_base_path and self.user_base_path != "/" and true_absolute_path.startswith(self.user_base_path):
+                             # Remove base path prefix if present and not root
+                             file_abs_path = true_absolute_path[len(self.user_base_path):].lstrip('/')
+                        else:
+                             # Use the calculated absolute path directly if base path is root or path doesn't start with it
+                             file_abs_path = true_absolute_path.lstrip('/') # Ensure no leading slash for API
+
+                        file_info = await client.get_file_info(file_abs_path) # Use the correct path
+                        # Check if get_file_info returned valid data before accessing it
+                        if isinstance(file_info, dict) and file_info:
+                            sign = file_info.get("sign")
+                        else:
+                            # Handle case where get_file_info failed or returned None/invalid data
+                            logger.warning(f"get_file_info did not return valid data for {name}. file_info: {file_info}")
+                            sign = None # Ensure sign remains None if fetch failed
+
+                        if sign:
+                            logger.debug(f"Found sign via get_file_info for download: {sign}")
+                            link = f"{base_link}?sign={sign}"
+                        else:
+                            logger.debug(f"No sign found via get_file_info for {name}, using unsigned link for download.")
+                            link = base_link # Fallback to unsigned if get_file_info fails or has no sign
+
+                if not link:
+                    yield event.plain_result(f"❌ 无法为文件 '{name}' 生成有效的下载链接。")
+                    return
+
+                yield event.plain_result(f"⏳ 正在下载文件 '{name}'...")
+                logger.info(f"Attempting to download file: {name} from link: {link}")
+
+                http_client = await client.get_client()
+                try:
+                    async with http_client.stream("GET", link, timeout=client.timeout * 10, follow_redirects=True) as response:
+                        response.raise_for_status() # Check for HTTP errors
+
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            logger.debug(f"File size: {self._format_size(int(content_length))}")
+
+                        file_bytes = await response.aread()
+                        logger.info(f"Successfully downloaded {len(file_bytes)} bytes for {name}.")
+
+
+                        temp_file = None
+
+                        plugin_dir = pathlib.Path(__file__).parent
+                        temp_dir_path = plugin_dir / "temp"
+                        try:
+                            temp_dir_path.mkdir(parents=True, exist_ok=True)
+                            logger.debug(f"Ensured temporary download directory exists: {temp_dir_path}")
+
+                            import tempfile # Import locally as a workaround
+                            with tempfile.NamedTemporaryFile(dir=str(temp_dir_path), delete=False, suffix=f"_{name or 'download'}") as temp_file:
+                                temp_file.write(file_bytes)
+                                temp_file_path = temp_file.name
+                                logger.debug(f"Saved downloaded content to temporary file: {temp_file_path}")
+
+                            # Construct MessageChain with File component using the temporary file path
+                            # Determine the path/URI to send to the adapter
+                            adapter_path_config = self.config.get("adapter_accessible_temp_path", "").strip()
+                            file_uri_to_send = ""
+                            if adapter_path_config:
+                                # Use the configured path + filename for the adapter
+                                temp_filename = os.path.basename(temp_file_path)
+                                adapter_full_path = os.path.join(adapter_path_config, temp_filename).replace("\\", "/") # Ensure forward slashes
+                                file_uri_to_send = pathlib.Path(adapter_full_path).as_uri()
+                                logger.debug(f"Using configured adapter path to build URI: {file_uri_to_send}")
+                            else:
+                                # Fallback to using the container's internal path URI (might fail)
+                                file_path_obj = pathlib.Path(temp_file_path)
+                                file_uri_to_send = file_path_obj.as_uri()
+                                logger.warning(f"adapter_accessible_temp_path not configured. Using internal path URI (may fail in Docker): {file_uri_to_send}")
+
+                            message_to_send = MessageChain([File(file=file_uri_to_send, name=name)])
+                            await event.send(message_to_send)
+                            # Add a delay to allow the client (e.g., NapCat) time to process the file
+                            # before the temporary file is deleted in the finally block.
+                            logger.debug("Waiting a few seconds before deleting the temporary file...")
+                            await asyncio.sleep(5) # Wait 5 seconds (adjust if needed)
+                            logger.info(f"Sent file {name} (from temp: {temp_file_path}) to user {sender_id}.")
+
+                        except Exception as send_e:
+                            logger.error(f"Error sending file {name}: {send_e}", exc_info=True)
+                            yield event.plain_result(f"❌ 发送文件时出错。")
+                        finally:
+                            # Clean up the temporary file
+                            if temp_file and os.path.exists(temp_file.name):
+                                try:
+                                    os.remove(temp_file.name)
+                                    logger.debug(f"Removed temporary file: {temp_file.name}")
+                                except Exception as rm_e:
+                                    logger.error(f"Error removing temporary file {temp_file.name}: {rm_e}")
+
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"HTTP error downloading file {name} from {link}: {e.response.status_code} - {e.response.text}")
+                    yield event.plain_result(f"❌ 下载文件时出错 (HTTP {e.response.status_code})。链接可能已失效或服务器错误。")
+                except httpx.RequestError as e:
+                    logger.error(f"Network error downloading file {name} from {link}: {e}")
+                    yield event.plain_result(f"❌ 下载文件时发生网络错误: {e}")
+                except Exception as download_e:
+                    logger.error(f"Unexpected error downloading/sending file {name}: {download_e}", exc_info=True)
+                    yield event.plain_result(f"❌ 下载或发送文件时发生意外错误。")
+
+            except Exception as link_e:
+                logger.error(f"Error generating download link for {name}: {link_e}", exc_info=True)
+                yield event.plain_result(f"❌ 生成下载链接时出错: {link_e}")
+                return
+
+        except ValueError:
+            yield event.plain_result(f"❌ 无效的序号 '{index_str}'。请输入一个数字。")
+        except IndexError:
+             logger.error(f"IndexError accessing state['results'] with index string '{index_str}'. State: {state}")
+             yield event.plain_result(f"❌ 内部错误：无法在缓存的结果中找到序号 {index_str}。请重试。")
+        except Exception as e:
+            logger.error(f"Error during download command setup: {e}", exc_info=True)
+            yield event.plain_result(f"处理下载命令时发生内部错误，请查看日志。")
+
+
+    @filter.command("al ul", alias={'alist ul', 'al upload', 'alist upload'})
+    async def upload_request_command(self, event: AstrMessageEvent):
+        """Initiates the file upload process, requires prior navigation."""
+        sender_id = event.get_sender_id()
+        # Use group_id if available, otherwise use sender_id (for private chats) - consistent with handle_message
+        group_id = event.get_group_id() if event.get_group_id() else sender_id
+        request_key = (sender_id, group_id)
+
+        # --- Check for navigation history ---
+        user_history = self.last_search_state.get(sender_id)
+        if not user_history:
+             logger.warning(f"User {sender_id} attempted 'al ul' without prior navigation.")
+             yield event.plain_result("❌ 请先导航到目标目录后再使用上传功能。")
+             return # Stop execution if no history
+        # --- End check ---
+
+        client = await self._get_client()
+        if not client:
+            yield event.plain_result("❌ Alist 客户端未初始化，请检查配置。")
+            return
+
+        # --- Add logging here ---
+        logger.debug(f"Determining upload path. Current self.user_base_path: '{self.user_base_path}'")
+        # --- End logging ---
+
+        # Get current path from the latest state
+        # History is guaranteed to exist here due to the check above
+        current_state = user_history[-1]
+        # Correct key is 'parent' based on state saved in _execute_api_call_and_format
+        current_path = current_state.get("parent", self.user_base_path) # Fallback just in case state is malformed
+        logger.debug(f"History found for {sender_id}, using current parent path: {current_path}")
+
+        # Store the upload request
+        timestamp = time.time()
+        self.upload_requests[request_key] = {
+            "timestamp": timestamp,
+            "path": current_path
+        }
+        logger.info(f"Upload request initiated for user {sender_id} in group {group_id} for path '{current_path}'. Waiting for file...")
+
+        # Clean up expired requests before sending confirmation
+        await self._cleanup_expired_uploads()
+
+        # Send confirmation message using yield
+        yield event.plain_result(f"⏳ 请在 {self.upload_timeout // 60} 分钟内发送要上传到 '{current_path}' 的文件。")
+
+        # Stop event propagation after successfully initiating the request
+        event.stop_event()
+        return
+
+        # Clean up expired requests (optional, can be done here or in handle_message)
+        await self._cleanup_expired_uploads()
+
+        # Send confirmation message using yield
+        yield event.plain_result(f"⏳ 请在 {self.upload_timeout // 60} 分钟内发送要上传到 '{current_path}' 的文件。")
+
+        # Clean up expired requests (optional, can be done here or in handle_message)
+        await self._cleanup_expired_uploads()
+
+        yield event.plain_result(f"⏳ 请在 {self.upload_timeout // 60} 分钟内发送要上传到 '{current_path}' 的文件。")
+
+    async def _cleanup_expired_uploads(self):
+        """Removes expired upload requests."""
+        now = time.time()
+        # Create a list of keys to avoid modifying dict during iteration
+        expired_keys = [
+            key for key, data in self.upload_requests.items()
+            if now - data.get("timestamp", 0) > self.upload_timeout
+        ]
+        for key in expired_keys:
+             # Use pop to safely remove the key, handling potential race conditions
+             removed_data = self.upload_requests.pop(key, None)
+             if removed_data: # Log only if a key was actually removed
+                 logger.info(f"Removed expired upload request for key: {key}")
+
+    # This method needs proper registration within AstrBot's event system.
+    # Use @event_message_type based on documentation to receive messages.
+    @event_message_type(EventMessageType.ALL) # Use decorator imported from filter
+    async def handle_message(self, event: AstrMessageEvent):
+        """Handles incoming messages to check for pending file uploads."""
+        # Check if the message contains a File component using event.message_obj.message
+        file_component: Optional[File] = None
+        # Ensure message_obj and message exist before iterating
+        if event.message_obj and hasattr(event.message_obj, 'message') and isinstance(event.message_obj.message, list):
+             for element in event.message_obj.message:
+                 if isinstance(element, File):
+                     file_component = element
+                     break # Found the first file
+        else:
+             # Log if message structure is unexpected, but continue processing other handlers
+             logger.debug(f"Event message_obj or message attribute missing/invalid for event: {type(event)}. Skipping file check.")
+             return # Allow event propagation
+
+        if not file_component:
+            # logger.debug("Message does not contain a File component, skipping upload check.")
+            # Not a file message, let other handlers process it
+            return # Allow event propagation
+
+        # --- It is a file message, proceed with upload check ---
+        sender_id = event.get_sender_id()
+        # Use group_id if available, otherwise use sender_id (for private chats)
+        group_id = event.get_group_id() if event.get_group_id() else sender_id
+        request_key = (sender_id, group_id)
+
+        logger.debug(f"Received message with File component from {sender_id}/{group_id}. Checking for pending upload request.")
+
+        # Clean up expired requests first
+        await self._cleanup_expired_uploads()
+
+        # Check if there's a pending upload request for this user/group
+        # Use get() first to check without removing, then pop() if we decide to handle it.
+        upload_request_info = self.upload_requests.get(request_key)
+
+        if not upload_request_info:
+            logger.debug(f"No pending upload request found for key {request_key}. Allowing event propagation.")
+            # No pending request for this user/group, let other handlers process
+            return # Allow event propagation
+
+        # --- Found a pending request, handle the upload ---
+        # Now remove the request as we are handling it
+        upload_request = self.upload_requests.pop(request_key, None)
+        # Double check if it was removed by another process in between get and pop (unlikely but possible)
+        if not upload_request:
+             logger.warning(f"Upload request for {request_key} disappeared between check and pop. Allowing event propagation.")
+             return # Allow event propagation
+
+        # Check for timeout (even though we popped, check the retrieved timestamp)
+        now = time.time()
+        request_time = upload_request.get("timestamp", 0)
+        target_path = upload_request.get("path", "/")
+
+        if now - request_time > self.upload_timeout:
+            logger.info(f"Upload request for key {request_key} has expired (checked after retrieval).")
+            # Optionally notify the user about expiration? Might be noisy.
+            # await event.reply("⏰ 上传请求已超时。请重新使用 `al ul` 命令。")
+            # Request expired, stop processing this event here
+            event.stop_event()
+            return
+
+        # --- Process the upload ---
+        logger.info(f"Processing pending upload for key {request_key} to path '{target_path}'.")
+        client = await self._get_client()
+        if not client:
+            yield event.plain_result("❌ Alist 客户端未初始化，无法上传。")
+            # Request already removed by pop
+            event.stop_event() # Stop processing
+            return
+
+        try:
+            # Get file details
+            # Correct attribute is 'name', not 'file_name' based on logs
+            file_name = getattr(file_component, 'name', 'unknown_file')
+            file_id = getattr(file_component, 'file_id', None)
+            file_path = getattr(file_component, 'file', None) # Get the local file path if available
+
+            file_content = None
+            logger.debug(f"Attempting to get content for file: name='{file_name}', id='{file_id}', path='{file_path}'")
+
+            # Attempt 1: Try using file_id with event.get_file_bytes
+            if file_id:
+                try:
+                    logger.debug(f"Attempting to get bytes using file_id: {file_id}")
+                    file_content = await event.get_file_bytes(file_id)
+                    if file_content:
+                         logger.debug(f"Successfully retrieved {len(file_content)} bytes using file_id.")
+                    else:
+                         logger.warning(f"event.get_file_bytes({file_id}) returned empty content.")
+                except Exception as e_get_bytes:
+                    logger.warning(f"Failed to get file bytes using file_id {file_id}: {e_get_bytes}. Will try local path if available.")
+                    file_content = None # Ensure content is None if get_bytes failed
+
+            # Attempt 2: If file_id failed or wasn't present, try reading from local path
+            if not file_content and file_path and isinstance(file_path, str):
+                logger.debug(f"Attempting to read file from local path: {file_path}")
+                try:
+                    # Define sync read function for asyncio.to_thread
+                    def read_local_file(path):
+                        with open(path, 'rb') as f:
+                            return f.read()
+
+                    # Run synchronous file read in a separate thread
+                    file_content = await asyncio.to_thread(read_local_file, file_path)
+                    if file_content:
+                        logger.debug(f"Successfully read {len(file_content)} bytes from local path: {file_path}")
+                    else:
+                        logger.warning(f"Reading local file {file_path} resulted in empty content.")
+                except FileNotFoundError:
+                    logger.error(f"Local file not found at path: {file_path}")
+                    file_content = None
+                except PermissionError:
+                     logger.error(f"Permission denied when trying to read local file: {file_path}")
+                     file_content = None
+                except Exception as e_read_local:
+                    logger.error(f"Error reading local file {file_path}: {e_read_local}", exc_info=True)
+                    file_content = None
+
+            # Final check: If no content could be obtained
+            if not file_content:
+                 logger.error(f"Could not retrieve file content for '{file_name}' using either file_id or local path. Upload failed.")
+                 yield event.plain_result(f"❌ 无法获取文件 '{file_name}' 的内容，上传失败。")
+                 event.stop_event()
+                 return
+
+            # Construct the full destination path
+            current_upload_path = target_path # Path where 'al ul' was issued
+            # Normalize base path '/' and join correctly
+            if current_upload_path == "/":
+                 destination_path = f"/{file_name.lstrip('/')}"
+            else:
+                 # Ensure no double slashes
+                 destination_path = f"{current_upload_path.rstrip('/')}/{file_name.lstrip('/')}"
+
+            # Normalize path separators
+            destination_path = destination_path.replace('\\', '/')
+            destination_path = re.sub(r'/+', '/', destination_path) # Consolidate slashes
+
+            logger.info(f"Uploading file '{file_name}' ({len(file_content)} bytes) to Alist path: '{destination_path}'")
+            yield event.plain_result(f"⏳ 正在上传文件 '{file_name}' 到 '{destination_path}'...") # Provide feedback
+
+            upload_result = await client.upload_file(destination_path, file_content, file_name)
+
+            # Request already removed by pop
+
+            if upload_result and upload_result.get("code") == 200:
+                logger.info(f"Successfully uploaded '{file_name}' to '{destination_path}'.")
+                reply_msg = f"✅ 文件 '{file_name}' 已成功上传到 '{destination_path}'。"
+
+                # Try to get the standard Alist download link (/d/...)
+                try:
+                    await asyncio.sleep(5) # Increase delay to 5 seconds
+
+                    # --- Get file info using the ORIGINAL upload path ---
+                    # destination_path is the path used for the upload API call (e.g., /2023/11/18/options.json)
+                    logger.debug(f"Getting file info using original upload path: '{destination_path}'")
+                    file_info = await client.get_file_info(destination_path) # Use original path
+                    # --- End get file info ---
+
+                    link = None
+                    if file_info and isinstance(file_info, dict):
+                         sign = file_info.get("sign") # Get the sign using the original path info
+
+                         # --- Construct the FINAL link URL by prepending the user base path ---
+                         # self.user_base_path is the base path from /api/me (e.g., /tera)
+                         if self.user_base_path and self.user_base_path != "/":
+                             link_path_for_url = f"{self.user_base_path.rstrip('/')}/{destination_path.lstrip('/')}"
+                         else:
+                             link_path_for_url = destination_path
+                         link_path_for_url = re.sub(r'/+', '/', link_path_for_url) # Normalize slashes
+                         logger.debug(f"Constructed final link path with base path: '{link_path_for_url}'")
+                         # --- End final link path construction ---
+
+                         # Construct the standard /d/ link using the FINAL constructed path
+                         encoded_path_for_link = quote(link_path_for_url) # Use final path for URL encoding
+                         base_link = f"{client.host}/d{encoded_path_for_link}"
+                         if sign:
+                             link = f"{base_link}?sign={sign}" # Append the sign obtained earlier
+                             logger.debug(f"Generated signed link for {file_name}: {link}")
+                         else:
+                             link = base_link # Use unsigned link if no sign
+                             logger.debug(f"Generated unsigned link for {file_name}: {link}")
+                         reply_msg += f"\n🔗 下载链接: {link}"
+                    else:
+                         logger.warning(f"Could not get file info using original path '{destination_path}' after upload. API response: {file_info}")
+                         reply_msg += f"\n⚠️ 无法获取上传文件的信息以生成下载链接。"
+
+                except Exception as get_info_e:
+                    # Use the original path in the error message for clarity on where get_file_info failed
+                    logger.error(f"Error getting file info/sign after upload for original path '{destination_path}': {get_info_e}", exc_info=True)
+                    reply_msg += f"\n⚠️ 获取文件签名以生成下载链接时出错。"
+
+                yield event.plain_result(reply_msg)
+            else:
+                error_msg = upload_result.get("message", "上传失败，请检查日志") if upload_result else "上传失败，请检查日志"
+                logger.error(f"Failed to upload file '{file_name}' to '{destination_path}'. Error: {error_msg}")
+                yield event.plain_result(f"❌ 上传文件 '{file_name}' 到 '{destination_path}' 失败: {error_msg}")
+
+            # Upload processed (success or failure), stop event propagation
+            event.stop_event() # Upload processed (success or failure), stop event propagation
+            return
+
+        except Exception as e:
+            logger.error(f"Error during file upload handling for key {request_key}: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 处理文件上传时发生内部错误: {e}")
+            # Request already removed by pop
+            # Stop event propagation on internal error during upload handling
+            event.stop_event() # Stop event propagation on internal error during upload handling
+            return
+
+
+
     @filter.command("al list", alias={'alist list', 'al 列表', 'alist 列表'})
     async def list_storages(self, event: AstrMessageEvent):
         """列出所有 Alist 存储。用法: /al list"""
@@ -1131,6 +1761,8 @@ class AlistPlugin(Star):
         reply_text += "/al r - 返回上一级视图。\n" # Added return command
         reply_text += "/al np - 跳转到列表结果的下一页。\n"
         reply_text += "/al lp - 跳转到列表结果的上一页。\n"
+        reply_text += "/al dl <序号> - 按序号下载文件列表中的文件。\n"
+        reply_text += "/al ul - 上传文件到文件列表中。\n"
         reply_text += "/al list - 列出所有 Alist 存储。\n"
         reply_text += "/al enable <存储ID> - 启用指定的 Alist 存储。\n"
         reply_text += "/al disable <存储ID> - 禁用指定的 Alist 存储。\n"
