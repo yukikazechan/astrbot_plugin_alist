@@ -40,5 +40,11 @@
         "type": "list",
         "hint": "允许使用此插件所有命令的用户 ID 列表.为空则不使用白名单",
         "default": []
+    },
+    "adapter_accessible_temp_path": {
+        "description": "协议端 (如NapCat) 可以访问到temp的绝对路径。",
+        "type": "string",
+        "default": "",
+        "hint": "（docker可填）此路径必须与 AstrBot 容器内的 /AstrBot/data/plugins/astrbot_plugin_alist/temp/ 指向宿主机的同一个共享卷。如果留空，将尝试使用容器内路径。"
     }
 }
