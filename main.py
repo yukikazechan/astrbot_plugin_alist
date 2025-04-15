@@ -688,9 +688,7 @@ class AlistPlugin(Star):
 
             # --- Add navigation hints ---
             if total_pages > 1:
-                 reply_text += f"\n\n📄 使用 /al np 翻页 (下一页), /al lp 翻页 (上一页)。 (共 {total_pages} 页)"
-            # Only show folder navigation hint if there are actual folders displayed OR if it's an empty dir
-            # Updated logic: Only show folder hint if there are actual folders displayed.
+                 reply_text += f"\n\n📄 使用 /al jm 页码，跳转到指定页码。 (共 {total_pages} 页)"
             if any(item.get("is_dir") for item in display_content):
                  reply_text += "\n\n➡️ 使用 /al fl <序号> 进入文件夹。"
             # Add return command hint if history exists
@@ -1019,97 +1017,55 @@ class AlistPlugin(Star):
         yield event.plain_result(result_message)
 
 
-    @filter.command("al np", alias={'alist np', 'al 下一页', 'alist 下一页'})
-    async def next_page_command(self, event: AstrMessageEvent):
-        """跳转到搜索列表结果的下一页。"""
-        # Get admin users directly as a list
+    @filter.command("al jm", alias={'alist jm', 'al jump', 'alist jump'})
+    async def jump_to_page_command(self, event: AstrMessageEvent, page_str: str):
+        """跳转到指定页码的搜索或列表结果。用法: /al jm <页码>"""
+        # 获取管理员用户列表
         admin_users = self.config.get("admin_users", [])
         sender_id = event.get_sender_id()
         if admin_users and sender_id not in admin_users:
             logger.warning(f"User {sender_id} is not an admin, access denied.")
             yield event.plain_result("没有权限使用此命令。")
             return
-        sender_id = event.get_sender_id()
         if not sender_id:
-             yield event.plain_result("❌ 无法获取用户信息。")
-             return
-        # Check if history exists and is not empty
+            yield event.plain_result("❌ 无法获取用户信息。")
+            return
+        # 检查是否有导航历史记录
         if sender_id not in self.last_search_state or not self.last_search_state[sender_id]:
-             yield event.plain_result("❌ 没有导航历史记录。")
-             return
-
-        logger.debug(f"next_page_command called by user {sender_id}")
+            yield event.plain_result("❌ 没有导航历史记录。")
+            return
+        logger.debug(f"jump_to_page_command called by user {sender_id} with page string: {page_str}")
         user_history = self.last_search_state[sender_id]
-        state = user_history[-1] # Get the current state (last item in the list)
+        state = user_history[-1]  # 获取当前状态（历史记录中的最后一项）
         if (time.time() - state["timestamp"]) > self.search_state_timeout:
             yield event.plain_result("❌ 上次操作已超时 (3分钟)。请重新使用 /al s 或 /al home。")
             return
+        
+        try:
+            target_page = int(page_str)
+            if not (1 <= target_page <= state["total_pages"]):
+                yield event.plain_result(f"❌ 无效的页码 '{target_page}'。请输入 1 到 {state['total_pages']} 之间的数字。")
+                return
+            keywords = state["keywords"]
+            parent = state["parent"]
+            logger.debug(f"Fetching page {target_page} for parent '{parent}' for user {sender_id}")
 
-        if state["current_page"] >= state["total_pages"]:
-            yield event.plain_result(f"❌ 已经是最后一页了 (第 {state['current_page']}/{state['total_pages']} 页)。")
-            return
+            client = await self._get_client()
+            if not client:
+                yield event.plain_result("错误：Alist 客户端未配置或初始化失败。")
+                return
 
-        next_page = state["current_page"] + 1
-        keywords = state["keywords"]
-        parent = state["parent"]
-        logger.debug(f"Fetching next page ({next_page}) for parent '{parent}' for user {sender_id}")
+            per_page = self.config.get("search_result_limit", 25)
+            yield event.plain_result(f"⏳ 正在跳转到第 {target_page} 页...")
 
-        client = await self._get_client()
-        if not client:
-            yield event.plain_result("错误：Alist 客户端未配置或初始化失败。")
-            return
+            result_message = await self._execute_api_call_and_format(event, client, target_page, per_page, parent, keywords=keywords)
+            yield event.plain_result(result_message)
 
-        per_page = self.config.get("search_result_limit", 25)
-        yield event.plain_result(f"⏳ 正在获取下一页 (第 {next_page} 页)...")
-
-        result_message = await self._execute_api_call_and_format(event, client, next_page, per_page, parent, keywords=keywords)
-        yield event.plain_result(result_message)
-
-    @filter.command("al lp", alias={'alist lp', 'al 上一页', 'alist 上一页'})
-    async def last_page_command(self, event: AstrMessageEvent):
-        """跳转到搜索列表结果的上一页。"""
-        # Get admin users directly as a list
-        admin_users = self.config.get("admin_users", [])
-        sender_id = event.get_sender_id()
-        if admin_users and sender_id not in admin_users:
-            logger.warning(f"User {sender_id} is not an admin, access denied.")
-            yield event.plain_result("没有权限使用此命令。")
-            return
-        sender_id = event.get_sender_id()
-        if not sender_id:
-             yield event.plain_result("❌ 无法获取用户信息。")
-             return
-        # Check if history exists and is not empty
-        if sender_id not in self.last_search_state or not self.last_search_state[sender_id]:
-             yield event.plain_result("❌ 没有导航历史记录。")
-             return
-
-        logger.debug(f"last_page_command called by user {sender_id}")
-        user_history = self.last_search_state[sender_id]
-        state = user_history[-1] # Get the current state (last item in the list)
-        if (time.time() - state["timestamp"]) > self.search_state_timeout:
-            yield event.plain_result("❌ 上次操作已超时 (3分钟)。请重新使用 /al s 或 /al home。")
-            return
-
-        if state["current_page"] <= 1:
-            yield event.plain_result(f"❌ 已经是第一页了。")
-            return
-
-        prev_page = state["current_page"] - 1
-        keywords = state["keywords"]
-        parent = state["parent"]
-        logger.debug(f"Fetching previous page ({prev_page}) for parent '{parent}' for user {sender_id}")
-
-        client = await self._get_client()
-        if not client:
-            yield event.plain_result("错误：Alist 客户端未配置或初始化失败。")
-            return
-
-        per_page = self.config.get("search_result_limit", 25)
-        yield event.plain_result(f"⏳ 正在获取上一页 (第 {prev_page} 页)...")
-
-        result_message = await self._execute_api_call_and_format(event, client, prev_page, per_page, parent, keywords=keywords)
-        yield event.plain_result(result_message)
+        except ValueError:
+            yield event.plain_result(f"❌ 无效的页码 '{page_str}'。请输入一个数字。")
+        except Exception as e:
+            logger.error(f"Error during jump to page command: {e}", exc_info=True)
+            yield event.plain_result(f"跳转到指定页码时发生内部错误，请查看日志。")
 
     @filter.command("al dl", alias={'alist dl', 'al download', 'alist download'})
     async def download_command(self, event: AstrMessageEvent, index_str: str):
@@ -1759,8 +1715,7 @@ class AlistPlugin(Star):
         reply_text += "/al fl <序号> - 进入指定序号的文件夹。\n"
         reply_text += "/al home - 列出根目录内容。\n"
         reply_text += "/al r - 返回上一级视图。\n" # Added return command
-        reply_text += "/al np - 跳转到列表结果的下一页。\n"
-        reply_text += "/al lp - 跳转到列表结果的上一页。\n"
+        reply_text += "/al jm <页码> - 跳转到指定页码。\n"
         reply_text += "/al dl <序号> - 按序号下载文件列表中的文件。\n"
         reply_text += "/al ul - 上传文件到文件列表中。\n"
         reply_text += "/al list - 列出所有 Alist 存储。\n"
