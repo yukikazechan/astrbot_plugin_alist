@@ -688,7 +688,7 @@ class AlistPlugin(Star):
 
             # --- Add navigation hints ---
             if total_pages > 1:
-                 reply_text += f"\n\n📄 使用 /al jm 页码，跳转到指定页码。 (共 {total_pages} 页)"
+                 reply_text += f"\n\n📄 使用 /al jm <页码>，跳转到指定页码。 (共 {total_pages} 页)"
             if any(item.get("is_dir") for item in display_content):
                  reply_text += "\n\n➡️ 使用 /al fl <序号> 进入文件夹。"
             # Add return command hint if history exists
